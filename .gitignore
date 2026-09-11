@@ -1,0 +1,12 @@
+# --- Internal specification & planning docs -------------------------------
+# The System this repo builds is open-source per its own spec (Apache-2.0,
+# see LICENSE). The *internal* specification, architecture rationale, and
+# deliverable-decomposition docs that describe it are not for the public
+# repo — they stay local only. See CLAUDE.md for where these actually live.
+docs/
+
+# --- OS / editor cruft ------------------------------------------------------
+.DS_Store
+
+# --- Claude Code local-only state ------------------------------------------
+.claude/settings.local.json
