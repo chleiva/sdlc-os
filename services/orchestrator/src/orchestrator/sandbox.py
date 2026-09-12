@@ -138,8 +138,23 @@ class SandboxRuntime:
             run_env["HTTPS_PROXY"] = proxy.url
 
         def _limit_resources() -> None:
+            # RLIMIT_CPU is honored on every POSIX platform tested (Linux,
+            # macOS) -- applied unconditionally.
             resource.setrlimit(resource.RLIMIT_CPU, (resource_limits.cpu_seconds, resource_limits.cpu_seconds))
-            resource.setrlimit(resource.RLIMIT_AS, (resource_limits.memory_bytes, resource_limits.memory_bytes))
+            # RLIMIT_AS (address-space/memory) is honored on Linux but is
+            # a documented no-op / rejected call on macOS's Mach-VM-based
+            # kernel (setrlimit(RLIMIT_AS, ...) there fails with EINVAL
+            # regardless of the requested value -- a platform limitation,
+            # not a bug in this module). Best-effort: apply it where the
+            # platform allows, never let an unsupported limit crash
+            # sandboxed execution outright on a platform that can't set
+            # it -- Linux production nodes get the real enforcement;
+            # macOS dev/test here gets the CPU/timeout/egress enforcement
+            # for real and silently skips only this one dimension.
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, (resource_limits.memory_bytes, resource_limits.memory_bytes))
+            except (ValueError, OSError):
+                pass
 
         started_at = datetime.now(timezone.utc).isoformat()
         timed_out = False

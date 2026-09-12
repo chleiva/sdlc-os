@@ -92,6 +92,18 @@ class CheckpointTrigger:
     reason: str
     details: dict
 
+    def signature(self) -> str:
+        """A deterministic fingerprint of this exact trigger occurrence
+        (kind + its numeric/file details), used to recognize "the human
+        already answered this precise violation" so resolving a
+        checkpoint with 'continue' doesn't re-pause on the very next step
+        for the identical, already-acknowledged condition. A genuinely
+        new violation (more files, a higher number) gets a different
+        signature and can still pause again."""
+        import json as _json
+
+        return f"{self.kind}:{_json.dumps(self.details, sort_keys=True, default=str)}"
+
 
 def check_size(diff_stats: DiffStats, budget: Budget) -> CheckpointTrigger | None:
     if diff_stats.lines_changed > budget.size_checkpoint_lines or len(diff_stats.files_touched) > budget.size_checkpoint_files:

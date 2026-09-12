@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from tenant_cell.naming import model_serving_namespace, node_pool_name, tenant_environment, tenant_slug
+
+_TENANT_CELL_MAIN_TF = (
+    Path(__file__).resolve().parents[1] / "infra" / "modules" / "tenant-cell" / "main.tf"
+)
 
 
 def test_node_pool_name_matches_hcl_formula():
@@ -34,3 +40,15 @@ def test_model_serving_namespace_is_tenant_scoped():
     ns_b = model_serving_namespace("pilot-aws-g7e", "globex")
     assert ns_a != ns_b
     assert "acme" in ns_a
+
+
+def test_python_naming_formula_stays_in_lockstep_with_the_hcl():
+    """Drift guard: `naming.py`'s docstring claims this formula is
+    mirrored exactly from `infra/modules/tenant-cell/main.tf`. Read the
+    actual committed HCL and assert the literal expressions are still
+    there -- if a future edit to either side changes the naming formula
+    without updating the other, this fails instead of silently drifting.
+    """
+    hcl = _TENANT_CELL_MAIN_TF.read_text()
+    assert 'tenant_environment = "${var.base_environment}-tenant-${var.tenant_id}"' in hcl
+    assert 'computed_node_pool_name = "${local.tenant_environment}-gpu-node-pool"' in hcl

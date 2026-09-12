@@ -1,0 +1,104 @@
+"""Section 9.5's structured plan artifact: schema validity, generation
+from a `PlanOutput`, and "regenerated, not hand-edited" as an actually
+enforced property (there is no update/patch function to call instead)."""
+from __future__ import annotations
+
+import json
+
+import pytest
+from jsonschema import Draft202012Validator
+
+from orchestrator.checkpoints import DEFAULT_BUDGETS
+from orchestrator.model_backend import SubTask
+from orchestrator.plan_artifact import (
+    PlanArtifactStore,
+    PlanArtifactValidationError,
+    SCHEMA,
+    generate_plan_artifact,
+    hash_human_plan,
+)
+
+from ._factories import make_plan_output
+
+
+def test_schema_itself_is_valid_draft_2020_12():
+    Draft202012Validator.check_schema(SCHEMA)
+
+
+def test_generate_plan_artifact_produces_a_schema_valid_document():
+    plan = make_plan_output()
+    artifact = generate_plan_artifact(
+        run_id="run-1", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="the plan text"
+    )
+    Draft202012Validator(SCHEMA).validate(artifact)
+    assert artifact["declared_scope"]["in_scope"] == ["src/foo.py", "tests/test_foo.py"]
+    assert artifact["declared_scope"]["out_of_scope"] == ["src/bar.py"]
+    assert artifact["acceptance_criteria_map"][0]["criterion_id"] == "AC1"
+    assert artifact["subtask_graph"]["subtasks"][0]["mode"] == "sequential"
+    assert artifact["risk"]["story_size"] == "S"
+    assert artifact["source_plan_hash"] == hash_human_plan("the plan text")
+
+
+def test_parallel_subtasks_without_a_fixed_interface_contract_are_rejected():
+    """Section 8.1: "contracts before parallel writes" -- fixed before
+    implementation starts. Enforced mechanically: two subtasks sharing a
+    parallel_group but no interface_contract fail generation outright."""
+    plan = make_plan_output(
+        subtasks=[
+            SubTask(task_id="t1", description="a", parallel_group="g1", depends_on=()),
+            SubTask(task_id="t2", description="b", parallel_group="g1", depends_on=()),
+        ]
+    )
+    with pytest.raises(PlanArtifactValidationError, match="interface_contract"):
+        generate_plan_artifact(run_id="run-2", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="t")
+
+
+def test_parallel_subtasks_with_fixed_contracts_are_accepted():
+    plan = make_plan_output(
+        subtasks=[
+            SubTask(task_id="t1", description="a", parallel_group="g1", depends_on=(), interface_contract="POST /a -> {ok: bool}"),
+            SubTask(task_id="t2", description="b", parallel_group="g1", depends_on=(), interface_contract="POST /b -> {ok: bool}"),
+        ]
+    )
+    artifact = generate_plan_artifact(run_id="run-3", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="t")
+    assert all(st["mode"] == "parallel" for st in artifact["subtask_graph"]["subtasks"])
+
+
+def test_regeneration_is_a_new_artifact_not_a_patch(tmp_path):
+    store = PlanArtifactStore(tmp_path / "artifacts")
+    plan_v1 = make_plan_output(scope_in=("src/a.py",))
+    artifact_v1 = generate_plan_artifact(run_id="run-4", plan_version=1, plan_output=plan_v1, budget=DEFAULT_BUDGETS["S"], human_plan_text="v1 text")
+    store.save(artifact_v1)
+
+    plan_v2 = make_plan_output(scope_in=("src/a.py", "src/b.py"))
+    artifact_v2 = generate_plan_artifact(run_id="run-4", plan_version=2, plan_output=plan_v2, budget=DEFAULT_BUDGETS["S"], human_plan_text="v2 text (human changed the plan)")
+    store.save(artifact_v2)
+
+    # Both versions are retained (a re-plan is a visible, logged change).
+    assert store.load_version("run-4", 1)["declared_scope"]["in_scope"] == ["src/a.py"]
+    assert store.load_version("run-4", 2)["declared_scope"]["in_scope"] == ["src/a.py", "src/b.py"]
+    assert store.load_latest("run-4")["plan_version"] == 2
+    assert store.load_version("run-4", 1)["source_plan_hash"] != store.load_version("run-4", 2)["source_plan_hash"]
+
+    # There is no mutate-in-place API on the store or the generator --
+    # the only way this module lets a caller change a declared scope is
+    # to call generate_plan_artifact again with a new PlanOutput.
+    assert not hasattr(store, "update")
+    assert not hasattr(store, "patch")
+
+
+def test_an_invalid_hand_built_artifact_fails_schema_validation():
+    """A caller cannot bypass generation and hand-craft a shape the
+    schema doesn't allow (e.g. an extra unknown field, or a missing
+    required one) without it being caught immediately."""
+    plan = make_plan_output()
+    artifact = generate_plan_artifact(run_id="run-5", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="t")
+    tampered = dict(artifact)
+    del tampered["declared_scope"]
+    errors = list(Draft202012Validator(SCHEMA).iter_errors(tampered))
+    assert errors, "removing a required field must fail schema validation"
+
+    tampered_2 = dict(artifact)
+    tampered_2["unexpected_hand_added_field"] = "sneaky"
+    errors_2 = list(Draft202012Validator(SCHEMA).iter_errors(tampered_2))
+    assert errors_2, "additionalProperties: false must reject an unknown hand-added field"

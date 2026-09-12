@@ -35,6 +35,7 @@ class RunProgress:
     spend_usd: float = 0.0
     consecutive_same_stage_failures: int = 0
     started_at: str = field(default_factory=_now_iso)
+    acknowledged_checkpoint_signatures: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

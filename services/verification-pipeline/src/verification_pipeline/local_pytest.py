@@ -65,7 +65,18 @@ def _parse_junit_xml(xml_path: Path) -> list[TestCaseResult]:
             if file_attr:
                 node_id = f"{file_attr}::{name}"
             else:
-                node_id = f"{classname}::{name}"
+                # Older/default JUnit-XML output (this pytest's xunit2
+                # family) omits the `file` attribute and only carries a
+                # dotted `classname` (module path, with any test-class
+                # name appended). For our fixtures -- flat module-level
+                # test functions, no test classes -- classname is exactly
+                # the dotted module path relative to the pytest rootdir,
+                # so "a.b.c" reliably reconstructs to "a/b/c.py". This does
+                # NOT handle a dotted class-in-module case (would need to
+                # split off the last segment as a class name instead of a
+                # path component) -- a known limitation, fine for this
+                # fixture set, flagged for whoever generalizes this runner.
+                node_id = f"{classname.replace('.', '/')}.py::{name}"
 
             failure = case.find("failure")
             error = case.find("error")
@@ -101,6 +112,7 @@ def run_pytest(
             "pytest",
             *targets,
             f"--junitxml={xml_path}",
+            f"--rootdir={cwd}",
             "-q",
             "--no-header",
             "-p",
