@@ -1,37 +1,46 @@
 """D10 adversarial pass on D6 (model serving / tenant compute cell).
 
-IMPORTANT SPEC-VS-CODE GAP FOUND BY THIS PASS (documented, not silently
-assumed away): the D10 brief and master spec Sec. 17.3 describe a
-per-tenant KMS key that gates secret decryption ("each tenant's secrets
-are wrapped under a KMS key scoped to that tenant alone ... decrypted
-only inside that tenant's own compute cell at the point of use"). An
-exhaustive read of `services/tenant-cell/` (every module under
-`src/tenant_cell/`, its README, and its OpenTofu variables/README) found
-**no KMS key context, secret-decryption API, or envelope-encryption
-logic anywhere in this deliverable** -- `tenant-cell`'s own
-`infra/modules/tenant-cell/variables.tf` and README explicitly disclaim
-it: "Does NOT provision a tenant's network, KMS key, or secrets
-bootstrap ... consumes an already-existing cluster/network/KMS context
-as inputs." The same is true of D5 (`source-control`): `TenantInstallation
-.private_key_pem` is documented as "expected to already be the plaintext
-unwrapped at the point of use from this tenant's own KMS-wrapped secret"
-but nothing in that package performs the unwrap either.
+HISTORICAL SPEC-VS-CODE GAP FOUND BY THIS PASS, NOW CLOSED: the D10
+brief and master spec Sec. 17.3 describe a per-tenant KMS key that
+gates secret decryption ("each tenant's secrets are wrapped under a
+KMS key scoped to that tenant alone ... decrypted only inside that
+tenant's own compute cell at the point of use"). At the time of this
+pass, an exhaustive read of `services/tenant-cell/` and `services/
+source-control/` found no KMS key context, secret-decryption API, or
+envelope-encryption logic anywhere in Wave 1 -- `tenant-cell`'s own
+`infra/modules/tenant-cell/variables.tf` and README explicitly
+disclaimed it ("Does NOT provision a tenant's network, KMS key, or
+secrets bootstrap ... consumes an already-existing cluster/network/KMS
+context as inputs"), and D5's `TenantInstallation.private_key_pem` was
+only documented as "expected to already be the plaintext unwrapped ...
+from this tenant's own KMS-wrapped secret" with nothing performing the
+unwrap.
 
-**Conclusion: the acceptance criterion "attempt to read one tenant's
-model-artifact/secret access using another tenant's KMS-key context and
-confirm it's denied" cannot be exercised against real code in this
-repo, because that boundary has not been built yet anywhere in Wave 1.**
-This is flagged in the final report as a genuine spec-vs-implementation
-gap for a human to resolve (most likely: it belongs to a not-yet-written
-"tenant onboarding/secrets" module, per tenant-cell's own README) -- it
-is explicitly NOT patched here, since inventing a KMS abstraction from
-scratch inside D10 would be exactly the "large refactor of another
-deliverable" the brief says not to do.
+That gap is why the test immediately below this docstring used to be a
+structural marker asserting `tenant_cell.kms`/`tenant_cell.secrets`/
+`source_control.kms` did NOT exist, with a comment saying the
+acceptance criterion "cannot be exercised against real code in this
+repo, because that boundary has not been built yet."
 
-What IS real and testable in D6 today is compute-identity isolation
-(never sharing a node/pool across tenants) -- this file adversarially
-extends that with a slugification-collision angle the existing
-`test_no_shared_node.py` suite doesn't cover.
+**It has since been built**: `services/kms-boundary` (consumed here as
+a real, editable-installed local dependency, same as every other
+target this file audits) implements real per-tenant envelope
+encryption against AWS KMS (tested against `moto`'s KMS mock), and
+`source_control.TenantInstallation.from_wrapped_private_key` /
+`issue_tracker.TenantJiraConfig.from_wrapped_oauth_token` are the new,
+additive integration points that consume it -- the plaintext-only
+constructor paths in both are unchanged. The marker test below now
+exercises the real acceptance criterion directly instead of asserting
+the boundary's absence; `kms-boundary`'s own suite
+(`services/kms-boundary/tests/test_cross_tenant_denial.py`) is the
+fuller adversarial treatment of the same boundary, cross-referenced
+here rather than duplicated.
+
+What IS ALSO real and testable in D6 is compute-identity isolation
+(never sharing a node/pool across tenants) -- the rest of this file
+adversarially extends that with a slugification-collision angle the
+existing `test_no_shared_node.py` suite doesn't cover; those tests are
+unchanged by this update.
 """
 from __future__ import annotations
 
@@ -42,16 +51,41 @@ from tenant_cell.naming import node_pool_name, tenant_environment, tenant_slug
 from tenant_cell.provisioning_client import FakeProvisioningClient
 
 
-def test_kms_cross_tenant_decryption_boundary_does_not_exist_in_this_repo_yet():
-    """Structural marker test (not a skip): fails loudly, not silently,
-    the moment someone adds a `kms`/`secrets` module to this deliverable
-    -- at which point this test (and the real adversarial KMS test it
-    should be replaced by) needs to be written for real."""
-    import importlib
+def test_kms_cross_tenant_decryption_boundary_now_exists_and_denies_cross_tenant_reads():
+    """Replaces the former structural marker test (which asserted
+    `kms_boundary` did not exist yet). Exercises the exact acceptance
+    criterion this pass originally flagged as unbuildable: attempt to
+    read one tenant's secret using another tenant's KMS-key context,
+    against real `boto3` calls into moto's mocked KMS backend, and
+    confirm it's denied -- not by this test's own logic, but by
+    `kms_boundary.KmsBoundary`/AWS KMS's real semantics. See
+    `services/kms-boundary/tests/test_cross_tenant_denial.py` for the
+    fuller adversarial suite (direct-KMS-call bypass of the package's
+    own bookkeeping, mismatched-encryption-context, no-plaintext-leak
+    cases) this one is a compact acceptance-level echo of.
+    """
+    import boto3
+    from moto import mock_aws
 
-    for candidate in ("tenant_cell.kms", "tenant_cell.secrets", "source_control.kms"):
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module(candidate)
+    from kms_boundary import CrossTenantDecryptionError, KmsBoundary, StaticTenantKeyResolver
+
+    with mock_aws():
+        client = boto3.client("kms", region_name="us-east-1")
+        tenant_a_key = client.create_key(Description="tenant-a")["KeyMetadata"]["KeyId"]
+        tenant_b_key = client.create_key(Description="tenant-b")["KeyMetadata"]["KeyId"]
+        resolver = StaticTenantKeyResolver({"tenant-a": tenant_a_key, "tenant-b": tenant_b_key})
+        boundary = KmsBoundary(client, resolver)
+
+        tenant_a_secret = boundary.encrypt("tenant-a", b"tenant-a's real model-artifact/secret bytes")
+
+        # The acceptance criterion, verbatim: tenant B's KMS-key context
+        # must not be able to decrypt tenant A's wrapped secret.
+        with pytest.raises(CrossTenantDecryptionError):
+            boundary.decrypt("tenant-b", tenant_a_secret)
+
+        # And the legitimate tenant still can -- proving the denial
+        # above is about tenant identity, not a broken boundary.
+        assert boundary.decrypt("tenant-a", tenant_a_secret) == b"tenant-a's real model-artifact/secret bytes"
 
 
 # ---------------------------------------------------------------------

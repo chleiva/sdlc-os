@@ -25,6 +25,13 @@ resource "kubernetes_namespace_v1" "this" {
   }
 }
 
+locals {
+  grafana_admin_password_remote_key = coalesce(
+    var.grafana_admin_password_remote_key,
+    "${var.environment}/${var.grafana_admin_password_secret_name}"
+  )
+}
+
 resource "helm_release" "kube_prometheus_stack" {
   name       = "kube-prometheus-stack"
   repository = "https://prometheus-community.github.io/helm-charts"
@@ -96,4 +103,112 @@ resource "helm_release" "tempo" {
       }
     })
   ]
+}
+
+# --- External Secrets Operator: SecretStore + ExternalSecret CRD
+# instances syncing the Grafana admin password from AWS Secrets Manager
+# into the Kubernetes Secret `grafana.admin.existingSecret` above
+# references (closes infra/README.md known-gap #6). Assumes ESO's
+# controller (CRDs + controller Deployment) is already installed
+# cluster-wide via its own Helm chart -- this module only declares the
+# CRD instances that tell an already-running ESO controller what to
+# sync, the same already-running-controller assumption
+# gpu-node-pool/aws makes about Karpenter (see that module's header
+# comment) and this deliverable's own KEDA assumption
+# (modules/model-serving-ollama/README.md).
+
+resource "kubernetes_service_account_v1" "eso_grafana" {
+  count = var.external_secrets_enabled ? 1 : 0
+
+  metadata {
+    name      = var.eso_service_account_name
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    annotations = var.eso_service_account_role_arn != null ? {
+      "eks.amazonaws.com/role-arn" = var.eso_service_account_role_arn
+    } : {}
+  }
+}
+
+resource "kubernetes_manifest" "eso_secret_store" {
+  count = var.external_secrets_enabled ? 1 : 0
+
+  manifest = {
+    apiVersion = "external-secrets.io/v1beta1"
+    kind       = "SecretStore"
+    metadata = {
+      name      = var.secret_store_name
+      namespace = kubernetes_namespace_v1.this.metadata[0].name
+    }
+    spec = {
+      provider = {
+        aws = {
+          service = "SecretsManager"
+          region  = var.aws_region
+          auth = {
+            jwt = {
+              serviceAccountRef = {
+                name = kubernetes_service_account_v1.eso_grafana[0].metadata[0].name
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.aws_region != null
+      error_message = "aws_region must be set when external_secrets_enabled = true."
+    }
+  }
+
+  depends_on = [kubernetes_service_account_v1.eso_grafana]
+}
+
+resource "kubernetes_manifest" "grafana_admin_password_external_secret" {
+  count = var.external_secrets_enabled ? 1 : 0
+
+  manifest = {
+    apiVersion = "external-secrets.io/v1beta1"
+    kind       = "ExternalSecret"
+    metadata = {
+      name      = "${var.grafana_admin_password_secret_name}-sync"
+      namespace = kubernetes_namespace_v1.this.metadata[0].name
+    }
+    spec = {
+      refreshInterval = var.external_secret_refresh_interval
+      secretStoreRef = {
+        name = var.secret_store_name
+        kind = "SecretStore"
+      }
+      target = {
+        # Name matches `grafana.admin.existingSecret` above exactly --
+        # this is the Kubernetes Secret the kube-prometheus-stack
+        # release already expects to find.
+        name           = var.grafana_admin_password_secret_name
+        creationPolicy = "Owner"
+        # See README "Why admin-user is not synced from Secrets
+        # Manager": seed-secrets.sh stores one opaque string per secret
+        # name, not a JSON object with separate properties, so the
+        # username is templated as a static, non-secret value here
+        # rather than invented as a fake JSON-property read.
+        template = {
+          data = {
+            "admin-user" = var.grafana_admin_username
+          }
+        }
+      }
+      data = [
+        {
+          secretKey = "admin-password"
+          remoteRef = {
+            key = local.grafana_admin_password_remote_key
+          }
+        },
+      ]
+    }
+  }
+
+  depends_on = [kubernetes_manifest.eso_secret_store]
 }

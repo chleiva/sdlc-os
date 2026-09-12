@@ -12,15 +12,33 @@ dependencies = [
     "jsonschema>=4.20",
     "mcp==2.2.0",
     "anyio>=4.0",
+    # kms-boundary: the per-tenant KMS envelope-encryption boundary
+    # (spec Sec. 17.3) SETUP.md previously only described as an
+    # external expectation ("wrap this tenant's OAuth credential under
+    # a per-tenant KMS key ... not implemented here either"). Used only
+    # by `TenantJiraConfig.from_wrapped_oauth_token` -- the existing
+    # plaintext-token constructor path is unchanged and needs no KMS
+    # context at all.
+    "kms-boundary @ file:../kms-boundary",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Test-only: builds a real `kms_boundary.WrappedSecret` fixture (via
+    # moto's mocked KMS backend, same as kms-boundary's own suite) to
+    # test `TenantJiraConfig.from_wrapped_oauth_token`'s wiring
+    # end-to-end. See services/kms-boundary/README.md for why moto is
+    # used.
+    "moto[kms]>=5.0",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/issue_tracker"]
+
+[tool.hatch.metadata]
+# Needed for the `file:../kms-boundary` local path dependency above.
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

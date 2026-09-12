@@ -113,6 +113,58 @@ variable "tenant_id" {
   default     = null
 }
 
+variable "pool_name_suffix" {
+  type        = string
+  description = <<-EOT
+    Optional suffix appended to the generated NodePool/EC2NodeClass/IAM
+    name ("$${var.environment}-gpu-node-pool[-<suffix>]"). Empty string
+    (the default) reproduces this module's original naming exactly, so
+    every existing caller of this module is unaffected. Set this when an
+    environment composes the module more than once against the same
+    `environment` value -- e.g. a second, spot-only/scale-to-zero pool
+    for an Ollama model-serving tier alongside the main GPU pool (see
+    environments/pilot-aws-g7e/main.tf) -- so the two instances don't
+    collide on resource names.
+  EOT
+  default     = ""
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]*$", var.pool_name_suffix))
+    error_message = "pool_name_suffix must be empty or lowercase alphanumeric/hyphen only (it becomes part of an AWS/Kubernetes resource name)."
+  }
+}
+
+variable "consolidate_after" {
+  type        = string
+  description = <<-EOT
+    Karpenter NodePool `disruption.consolidateAfter` duration (e.g.
+    "1m", "60s") -- how long a node must sit empty/underutilized before
+    Karpenter's `WhenEmptyOrUnderutilized` consolidation actually
+    terminates the EC2 instance. Kept short (a spot-only, scale-to-zero
+    tier wants the node reclaimed quickly once KEDA has scaled its
+    Deployment to zero) or longer (the shared vLLM pool, where
+    frequent churn is undesirable), per pool. Defaults to this module's
+    original hardcoded value so existing callers see no behavior change.
+  EOT
+  default     = "1m"
+}
+
+variable "user_data" {
+  type        = string
+  description = <<-EOT
+    Rendered node-bootstrap script (EC2 user data) to set on the
+    EC2NodeClass, run before kubelet registers the node. Intended to be
+    `sandbox-runtime/firecracker`'s (or kata/gvisor's) rendered
+    `bootstrap_script` output -- see that module's own header comment
+    for why it previously sat unwired. `null` (the default) omits
+    `userData` from the EC2NodeClass entirely, reproducing this
+    module's original behavior for any caller that doesn't pass one
+    (e.g. a pool that never runs sandboxed tool-execution workloads and
+    so has no isolation-tier shim to install).
+  EOT
+  default     = null
+}
+
 variable "tags" {
   type        = map(string)
   description = "Common resource tags applied to every resource this module creates."

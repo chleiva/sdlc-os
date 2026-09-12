@@ -1,0 +1,46 @@
+# Default values — overridden by modules/model-serving-ollama/main.tf's
+# inline `values` block per environment. Kept here so the chart is
+# independently helm-lintable/installable without going through OpenTofu.
+
+environment: "dev"
+tenantId: "shared"
+
+image:
+  repository: ollama/ollama
+  tag: "latest"
+
+model:
+  # ~23GB quantized model (spec §13.5's pinned model). See this module's
+  # README "Known follow-up: pulled fresh on every pod start" for what
+  # that costs in practice.
+  name: "ornith-1.5-35b-a3b"
+
+replicas: 1
+
+nodeSelector: {}
+tolerations: []
+
+# Shorter default than modules/model-serving's vLLM chart (90s): Ollama's
+# request/response serving has no in-flight-drain story of its own here
+# (see this chart's deployment.yaml comment) -- this is plain kubelet
+# SIGTERM grace, not a sized drain budget.
+terminationGracePeriodSeconds: 30
+
+resources:
+  # Sized against the documented default instance profile, g6e.xlarge
+  # (4 vCPU / 32GiB RAM / 1x NVIDIA L40S 48GB) -- see variables.tf's
+  # instance_type default and README's instance-type/GPU-class note.
+  # Deliberately leaves headroom under the instance's 4 vCPU / 32GiB so
+  # the pod isn't fighting kubelet/system daemonsets for the last slice
+  # of either resource.
+  limits:
+    nvidia.com/gpu: 1
+    cpu: "4"
+    memory: "30Gi"
+  requests:
+    nvidia.com/gpu: 1
+    cpu: "3"
+    memory: "24Gi"
+
+service:
+  port: 11434

@@ -11,15 +11,34 @@ dependencies = [
     "cryptography>=42.0",
     "mcp==2.2.0",
     "jsonschema>=4.21",
+    # kms-boundary: the per-tenant KMS envelope-encryption boundary
+    # (spec Sec. 17.3) this service's own docstrings previously only
+    # described as an expectation ("private_key_pem is expected to
+    # already be the plaintext unwrapped ... from this tenant's own
+    # KMS-wrapped secret"). Used only by `TenantInstallation.
+    # from_wrapped_private_key` -- the existing plaintext-PEM
+    # constructor path is unchanged and needs no KMS context at all.
+    "kms-boundary @ file:../kms-boundary",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Test-only: builds a real `kms_boundary.WrappedSecret` fixture (via
+    # moto's mocked KMS backend, same as kms-boundary's own suite) to
+    # test `TenantInstallation.from_wrapped_private_key`'s wiring
+    # end-to-end, rather than a hand-rolled fake KmsBoundary standing in
+    # for real envelope-encryption/decryption. See
+    # services/kms-boundary/README.md for why moto is used.
+    "moto[kms]>=5.0",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/source_control"]
+
+[tool.hatch.metadata]
+# Needed for the `file:../kms-boundary` local path dependency above.
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

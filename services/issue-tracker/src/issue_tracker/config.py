@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from kms_boundary import KmsBoundary, WrappedSecret
+
 
 @dataclass(frozen=True)
 class TenantJiraConfig:
@@ -79,3 +81,42 @@ class TenantJiraConfig:
 
     def size_label(self, size: str) -> str:
         return f"size:{size}"
+
+    @classmethod
+    def from_wrapped_oauth_token(
+        cls,
+        *,
+        wrapped_oauth_token: WrappedSecret,
+        kms_boundary: KmsBoundary,
+        **kwargs: object,
+    ) -> "TenantJiraConfig":
+        """Alternate constructor (additive -- the plain constructor
+        above, which takes `oauth_bearer_token` as an already-plaintext
+        string, is unchanged and still works exactly as before): builds
+        a `TenantJiraConfig` by unwrapping `wrapped_oauth_token` via
+        `kms_boundary.decrypt(tenant_id, ...)` at this exact point of
+        use.
+
+        This is the concrete implementation of what SETUP.md's step 1.5
+        previously only described as an external expectation: "wrap
+        this tenant's OAuth credential under a KMS key scoped to that
+        tenant alone, decrypted only inside that tenant's own compute
+        cell -- this codebase's `TenantJiraConfig` accepts a plain
+        token/secret because *how* it is fetched/decrypted is ... out-
+        side D4's own scope." `kwargs` must include `tenant_id` (and
+        `base_url`, and any other field the plain constructor would
+        otherwise need) -- it is what selects which tenant's KMS key
+        context unwraps `wrapped_oauth_token`; `kms_boundary`
+        fail-closed rejects (with `kms_boundary.
+        CrossTenantDecryptionError`) an attempt to unwrap a token that
+        was wrapped for a different tenant. `auth_mode` defaults to
+        `"oauth_bearer"` (this constructor makes no sense for
+        `"basic"` auth) but may be overridden via `kwargs` if a caller
+        has a reason to.
+        """
+        tenant_id = kwargs.get("tenant_id")
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        oauth_bearer_token = kms_boundary.decrypt(str(tenant_id), wrapped_oauth_token).decode("utf-8")
+        kwargs.setdefault("auth_mode", "oauth_bearer")
+        return cls(oauth_bearer_token=oauth_bearer_token, **kwargs)  # type: ignore[arg-type]

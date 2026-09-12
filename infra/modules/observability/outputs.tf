@@ -20,3 +20,8 @@ output "loki_release" {
 output "tempo_release" {
   value = helm_release.tempo.name
 }
+
+output "external_secret_name" {
+  value       = var.external_secrets_enabled ? "${var.grafana_admin_password_secret_name}-sync" : null
+  description = "Name of the ExternalSecret syncing the Grafana admin password, or null when external_secrets_enabled = false."
+}

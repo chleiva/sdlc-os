@@ -21,3 +21,17 @@ model_weight_checksum = "CHANGE-ME-sha256-of-pinned-artifact"
 
 storage_class = "gp3"
 mesh_enabled  = true
+
+# --- Ollama model-serving option (off by default; vLLM above stays the
+# default serving backend either way) ------------------------------------
+# Requires KEDA's controller already installed cluster-wide if
+# ollama_keda_enabled = true (see modules/model-serving-ollama/README.md).
+# ollama_run_registry_metrics_url has no real value to give yet -- see
+# that same README's "KEDA trigger: run-registry integration gap".
+
+# ollama_enabled                  = true
+# ollama_model_name               = "ornith-1.5-35b-a3b"
+# ollama_instance_type            = "g6e.xlarge"   # 48GB-class single GPU (L40S)
+# ollama_consolidate_after        = "60s"
+# ollama_keda_enabled             = false           # see README gap before enabling
+# ollama_run_registry_metrics_url = ""              # does not exist in services/run-registry today

@@ -24,7 +24,7 @@ terraform {
 }
 
 locals {
-  name = "${var.environment}-gpu-node-pool"
+  name = var.pool_name_suffix != "" ? "${var.environment}-gpu-node-pool-${var.pool_name_suffix}" : "${var.environment}-gpu-node-pool"
 
   tags = merge(var.tags, {
     "sdlc-auto:environment" = var.environment
@@ -36,6 +36,14 @@ locals {
   # rather than hardcoded, so the sizing ladder (spec §13.3) and the
   # same-capability-fallback family (spec §14.8) both flow through the one
   # variable instead of needing a second edit here.
+  #
+  # A spot-only pool with no on-demand fallback (e.g. this deliverable's
+  # Ollama serving tier, see environments/pilot-aws-g7e/main.tf) already
+  # falls out of this expression with no new resource type needed: pass
+  # capacity_type = "spot" and on_demand_fallback = false and this
+  # collapses to ["spot"] alone. Genuinely extending the existing
+  # variable/parameter contract, per this deliverable's own instruction,
+  # rather than adding a parallel "spot_only" module.
   capacity_type_values = var.capacity_type == "spot" && var.on_demand_fallback ? ["spot", "on-demand"] : [var.capacity_type]
 }
 
@@ -75,7 +83,17 @@ resource "aws_iam_instance_profile" "node" {
 }
 
 # --- Karpenter EC2NodeClass: how a node is launched -------------------------
-
+#
+# GPU nodes boot the AL2023 NVIDIA-enabled AMI family; sandbox-runtime
+# module's firecracker/kata bootstrap layers on top via userData below.
+#
+# Wires sandbox-runtime/firecracker's rendered bootstrap script into the
+# EC2NodeClass's userData (infra/README.md known-gap #3, this module's
+# side of it). `merge()` rather than a plain `userData = var.user_data`
+# assignment so a `null` var.user_data (the default -- see
+# variables.tf) omits the key entirely instead of sending an explicit
+# null to the Kubernetes API, matching how Karpenter's own examples
+# treat an absent userData.
 resource "kubernetes_manifest" "ec2_node_class" {
   manifest = {
     apiVersion = "karpenter.k8s.aws/v1"
@@ -83,19 +101,20 @@ resource "kubernetes_manifest" "ec2_node_class" {
     metadata = {
       name = local.name
     }
-    spec = {
-      role = aws_iam_role.node.name
-      subnetSelectorTerms = [
-        { tags = { "karpenter.sh/discovery" = var.environment } }
-      ]
-      securityGroupSelectorTerms = [
-        { id = var.egress_allowlist_group_id }
-      ]
-      # GPU nodes boot the AL2023 NVIDIA-enabled AMI family; sandbox-runtime
-      # module's firecracker/kata bootstrap layers on top via userData.
-      amiFamily = "AL2023"
-      tags      = local.tags
-    }
+    spec = merge(
+      {
+        role = aws_iam_role.node.name
+        subnetSelectorTerms = [
+          { tags = { "karpenter.sh/discovery" = var.environment } }
+        ]
+        securityGroupSelectorTerms = [
+          { id = var.egress_allowlist_group_id }
+        ]
+        amiFamily = "AL2023"
+        tags      = local.tags
+      },
+      var.user_data != null ? { userData = var.user_data } : {}
+    )
   }
 }
 
@@ -161,7 +180,7 @@ resource "kubernetes_manifest" "node_pool" {
         # policy, complementing (not replacing) the spot-lifecycle
         # module's interruption watcher for the ~2-minute warning window.
         consolidationPolicy = "WhenEmptyOrUnderutilized"
-        consolidateAfter    = "1m"
+        consolidateAfter    = var.consolidate_after
       }
       weight = 10
     }

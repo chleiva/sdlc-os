@@ -20,9 +20,9 @@ cd services/security-hardening
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 
-# Every target service, editable (order matters: run-registry first,
-# since several others depend on it):
-for pkg in run-registry issue-tracker job-dispatcher orchestrator \
+# Every target service, editable (order matters: run-registry and
+# kms-boundary first, since several others depend on them):
+for pkg in run-registry kms-boundary issue-tracker job-dispatcher orchestrator \
            index-server source-control tenant-cell fleet-dashboard \
            verification-pipeline gates; do
   .venv/bin/pip install -e ../$pkg
@@ -35,7 +35,7 @@ done
 # otherwise silently reinstalls them as non-editable copies as a side
 # effect of the previous step -- same three-step dance fleet-dashboard's
 # own README documents for run-registry):
-for pkg in run-registry issue-tracker job-dispatcher orchestrator \
+for pkg in run-registry kms-boundary issue-tracker job-dispatcher orchestrator \
            index-server source-control tenant-cell fleet-dashboard \
            verification-pipeline gates; do
   .venv/bin/pip install -e ../$pkg --force-reinstall --no-deps

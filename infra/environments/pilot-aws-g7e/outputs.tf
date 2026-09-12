@@ -29,3 +29,8 @@ output "secret_ids" {
   value       = module.secrets.secret_ids
   description = "Map of logical secret name -> AWS Secrets Manager ARN. Contains no secret values."
 }
+
+output "ollama_service_endpoint" {
+  value       = var.ollama_enabled ? module.model_serving_ollama[0].service_endpoint : null
+  description = "In-cluster DNS name of the Ollama service, or null when ollama_enabled = false. OpenAI-compatible routes live under /v1/ on this endpoint."
+}

@@ -24,11 +24,16 @@ dependencies = [
     "fleet-dashboard @ file:../fleet-dashboard",       # D8
     "verification-pipeline @ file:../verification-pipeline",  # D7 (cross-cutting license/CVE-blocking check only)
     "gates @ file:../gates",                           # D9 (landed mid-pass; see report)
+    "kms-boundary @ file:../kms-boundary",              # the per-tenant KMS boundary this file's marker test now exercises for real
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Test-only: exercises the real cross-tenant-denial acceptance
+    # criterion in test_d6_kms_and_node_isolation.py against moto's
+    # mocked KMS backend, same as kms-boundary's own suite.
+    "moto[kms]>=5.0",
 ]
 
 [tool.hatch.build.targets.wheel]

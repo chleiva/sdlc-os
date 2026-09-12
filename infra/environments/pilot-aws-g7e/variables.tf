@@ -73,6 +73,58 @@ variable "mesh_enabled" {
   default     = true
 }
 
+# --- Ollama model-serving option (alongside vLLM, not a replacement) ------
+#
+# See modules/model-serving-ollama/README.md for the full real-vs-gap
+# breakdown (model pull-on-every-start cost, context-length/VRAM caveat,
+# KEDA/run-registry trigger gap). Off by default: the vLLM path
+# (module.model_serving below) remains this environment's default serving
+# backend; a real pilot that wants to compare both sets this true.
+
+variable "ollama_enabled" {
+  type        = bool
+  description = "Deploy the Ollama serving tier (modules/model-serving-ollama) alongside the existing vLLM tier. False by default -- opt-in, not a replacement for the vLLM path."
+  default     = false
+}
+
+variable "ollama_model_name" {
+  type        = string
+  description = "Model for the Ollama tier to `ollama pull` on first pod start (spec §13.5's pinned model)."
+  default     = "ornith-1.5-35b-a3b"
+}
+
+variable "ollama_instance_type" {
+  type        = string
+  description = "Single-GPU instance type for the Ollama tier's dedicated spot-only NodePool and pod nodeSelector -- a 48GB-class card. Parameterized, not hardcoded; g6e.xlarge (NVIDIA L40S) is the documented default."
+  default     = "g6e.xlarge"
+}
+
+variable "ollama_consolidate_after" {
+  type        = string
+  description = "Karpenter `disruption.consolidateAfter` for the Ollama tier's spot-only NodePool -- short by design (spec: scale-to-zero should actually reclaim the node quickly once KEDA scales the Deployment to 0)."
+  default     = "60s"
+}
+
+variable "ollama_keda_enabled" {
+  type        = bool
+  description = <<-EOT
+    Whether to declare the KEDA ScaledObject for the Ollama tier. False
+    by default: see modules/model-serving-ollama/README.md's "KEDA
+    trigger: run-registry integration gap" -- the metrics-api endpoint
+    this trigger needs does not exist in services/run-registry today, so
+    turning this on without a real `ollama_run_registry_metrics_url`
+    would point KEDA at nothing. Requires KEDA's controller already
+    installed cluster-wide regardless (see that module's README).
+  EOT
+  default     = false
+}
+
+variable "ollama_run_registry_metrics_url" {
+  type        = string
+  description = "URL of a run-registry HTTP endpoint returning {\"count\": <int>} of runs awaiting a model response (see modules/model-serving-ollama/README.md for the exact contract). No real default -- this endpoint does not exist in services/run-registry today; must be set before ollama_keda_enabled = true is usable."
+  default     = ""
+}
+
 variable "tags" {
   type        = map(string)
   description = "Common resource tags."

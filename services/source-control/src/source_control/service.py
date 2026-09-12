@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from kms_boundary import KmsBoundary, WrappedSecret
 from source_control import git_ops, webhook
 from source_control.audit import AuditLogger
 from source_control.errors import NotFoundError, PermissionDeniedError, SourceControlError
@@ -64,6 +65,46 @@ class TenantInstallation:
     allowed_repositories: frozenset[str]
     mirror_root: Path
     api_base_url: str = "https://api.github.com"
+
+    @classmethod
+    def from_wrapped_private_key(
+        cls,
+        *,
+        tenant_id: str,
+        installation_id: str,
+        app_id: str,
+        app_slug: str,
+        wrapped_private_key: WrappedSecret,
+        kms_boundary: KmsBoundary,
+        allowed_repositories: frozenset[str],
+        mirror_root: Path,
+        api_base_url: str = "https://api.github.com",
+    ) -> "TenantInstallation":
+        """Alternate constructor (additive -- the plain, plaintext-PEM
+        constructor above is unchanged and is still what every existing
+        test in this suite uses): builds a `TenantInstallation` from a
+        `kms_boundary.WrappedSecret` instead of an already-unwrapped
+        PEM, by calling `kms_boundary.decrypt(tenant_id, ...)` at this
+        exact point of use -- closing the gap this class's own
+        docstring previously only described as an external expectation
+        ("private_key_pem is expected to already be the plaintext
+        unwrapped ... from this tenant's own KMS-wrapped secret",
+        Sec. 17.3). `kms_boundary` fail-closed rejects (with
+        `kms_boundary.CrossTenantDecryptionError`) an attempt to unwrap
+        a secret that was not wrapped for this same `tenant_id` -- see
+        `services/kms-boundary/README.md`.
+        """
+        private_key_pem = kms_boundary.decrypt(tenant_id, wrapped_private_key)
+        return cls(
+            tenant_id=tenant_id,
+            installation_id=installation_id,
+            app_id=app_id,
+            app_slug=app_slug,
+            private_key_pem=private_key_pem,
+            allowed_repositories=allowed_repositories,
+            mirror_root=mirror_root,
+            api_base_url=api_base_url,
+        )
 
 
 class InstallationRegistry:

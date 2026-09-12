@@ -11,7 +11,8 @@ infra/
   modules/
     network/{aws,gcp,azure,baremetal}/
     gpu-node-pool/{aws,gcp,azure,baremetal}/
-    model-serving/            # cloud-agnostic
+    model-serving/            # cloud-agnostic (vLLM)
+    model-serving-ollama/      # cloud-agnostic (Ollama; spot-only, scale-to-zero)
     orchestrator/              # cloud-agnostic
     sandbox-runtime/{firecracker,kata,gvisor}/
     spot-lifecycle/            # cloud-agnostic layout; AWS signal path implemented
@@ -37,8 +38,9 @@ infra/
 access included, as part of this deliverable):
 
 - `network/aws`, `gpu-node-pool/aws`, `secrets/aws-secrets-manager`
-- `model-serving`, `orchestrator`, `observability`, `spot-lifecycle`
-  (cloud-agnostic modules; spot-lifecycle's AWS signal path)
+- `model-serving`, `model-serving-ollama`, `orchestrator`,
+  `observability`, `spot-lifecycle` (cloud-agnostic modules;
+  spot-lifecycle's AWS signal path)
 - `sandbox-runtime/firecracker`
 - `environments/pilot-aws-g7e` (full composition: EKS cluster, system
   node group, Karpenter, and every module above wired together)
@@ -68,20 +70,27 @@ module's README/comments rather than silently present:
    not a real agent runtime (D2 doesn't exist yet).
 2. `model-serving`'s `preStop` hook calls a `/stop_accepting` path vLLM
    doesn't actually expose yet — a documented best-effort placeholder.
-3. `sandbox-runtime/firecracker` registers a RuntimeClass and renders a
-   node-bootstrap script, but that script isn't yet wired into
-   `gpu-node-pool/aws`'s `EC2NodeClass.userData` — a one-line integration
-   gap, not a redesign.
+3. ~~`sandbox-runtime/firecracker` ... not yet wired into
+   `gpu-node-pool/aws`'s `EC2NodeClass.userData`~~ — **closed**:
+   `gpu-node-pool/aws` now accepts a `user_data` variable, and
+   `environments/pilot-aws-g7e/main.tf` passes
+   `module.sandbox_runtime.bootstrap_script` into it. See that
+   environment's README for the small dependency-cycle fix this needed.
 4. `spot-lifecycle` implements the AWS signal path for real; GCP/Azure
    signal sources are not implemented (`cloud_provider` only turns on
    real logic for `"aws"`).
-5. `pilot-aws-g7e/eks.tf`'s Karpenter controller IAM policy is a
-   deliberately flagged `PowerUserAccess` placeholder — replace with
-   Karpenter's documented least-privilege policy before any real apply.
-6. `observability`'s Grafana admin-password secret is referenced by name
-   but nothing here syncs the AWS Secrets Manager entry into the
-   Kubernetes Secret Grafana's chart expects — needs External Secrets
-   Operator or the Secrets Store CSI Driver, not built in this pass.
+5. ~~`pilot-aws-g7e/eks.tf`'s Karpenter controller IAM policy is a
+   deliberately flagged `PowerUserAccess` placeholder~~ — **closed**:
+   replaced with Karpenter's own documented least-privilege controller
+   policy (see `eks.tf`'s `data.aws_iam_policy_document.karpenter_controller`
+   and that environment's README).
+6. ~~`observability`'s Grafana admin-password secret is referenced by
+   name but nothing here syncs~~ — **closed**: `observability` now
+   declares a real External Secrets Operator `SecretStore`/
+   `ExternalSecret` (opt-in via `external_secrets_enabled`, on by
+   default in `pilot-aws-g7e`). ESO's own controller is a cluster-wide
+   prerequisite this module does not install — see
+   `modules/observability/README.md`.
 7. `scripts/smoke-test.sh` runs real infra-level checks (Helm release
    status, a live round-trip against the model-serving endpoint) but the
    actual §20.1 evaluation-suite subset is D7's deliverable — the script
@@ -92,6 +101,20 @@ module's README/comments rather than silently present:
    for real; the "no developer-visible data loss" half depends on D2's
    checkpoint/resume logic, which doesn't exist yet — the script says so
    rather than declaring the drill fully passed.
+9. `model-serving-ollama` (new) re-pulls its ~23GB quantized model on
+   every fresh pod start (no baked image/PVC yet — see that module's
+   README), has not had its real context-length/VRAM envelope
+   load-tested against any live GPU, and its KEDA `ScaledObject`'s
+   `metrics-api` trigger points at a run-registry HTTP endpoint
+   (a count of runs awaiting a model response) that **does not exist in
+   `services/run-registry` today** — that service exposes only an MCP
+   tool-call surface and a Python library, no plain HTTP+JSON endpoint.
+   Flagged explicitly rather than invented; `ollama_keda_enabled`
+   defaults to `false` in `pilot-aws-g7e` until it's built.
+10. KEDA's own controller is a new cluster-wide prerequisite introduced
+    by `model-serving-ollama`, alongside the pre-existing
+    Karpenter-controller assumption — neither is installed by any
+    module in this tree.
 
 **Nothing in this tree was run against a real cloud account** (no AWS
 credentials, no live cluster, in this build environment) — every module

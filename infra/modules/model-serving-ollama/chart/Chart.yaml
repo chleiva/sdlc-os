@@ -1,0 +1,13 @@
+apiVersion: v2
+name: model-serving-ollama
+description: >-
+  Ollama (https://ollama.com, official ollama/ollama image) serving chart
+  for model ornith-1.5-35b-a3b (spec §13.5), as a spot-only,
+  scale-to-zero alternative to the vLLM chart in
+  modules/model-serving/chart -- for a tenant/pilot that wants to compare
+  serving backends, not a replacement for it. Cloud-agnostic — deployed
+  identically regardless of which cloud's gpu-node-pool/network modules
+  provisioned the underlying node.
+type: application
+version: 0.1.0
+appVersion: "phase-0"
