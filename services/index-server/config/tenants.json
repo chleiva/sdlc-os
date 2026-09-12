@@ -1,0 +1,10 @@
+{
+  "tenant-acme": {
+    "repositories": {
+      "fixture/multi-pkg-repo": "../tests/fixtures/multi_pkg_repo"
+    }
+  },
+  "tenant-other": {
+    "repositories": {}
+  }
+}

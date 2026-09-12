@@ -1,0 +1,4 @@
+[project]
+name = "pkg-b"
+version = "0.0.0"
+description = "Fixture package B (reporting) -- package marker for monorepo scope resolution."

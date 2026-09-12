@@ -1,0 +1,7 @@
+# Fixture CODEOWNERS -- last matching rule wins (GitHub semantics).
+# Deliberately no catch-all "*" rule: files outside pkg_a/ and pkg_b/
+# (e.g. unowned/scratch.py) are used by tests to exercise the
+# get-ownership-metadata EmptyResult path (no CODEOWNERS entry).
+pkg_a/                  @billing-team
+pkg_b/                  @reporting-team
+pkg_a/billing/util.py   @billing-team @jane-doe
