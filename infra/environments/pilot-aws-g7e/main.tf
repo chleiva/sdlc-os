@@ -237,7 +237,15 @@ module "model_serving_ollama" {
   service_account_role_arn = local.ollama_model_cache_s3_enabled ? aws_iam_role.ollama_model_cache[0].arn : null
   tags                     = var.tags
 
-  depends_on = [module.gpu_node_pool_ollama]
+  # helm_release.keda: this module's own ScaledObject (kubernetes_manifest)
+  # is a CRD instance -- it applies fine against the API server whether or
+  # not KEDA's controller is actually running to reconcile it, but with no
+  # controller watching it would just sit there inert, silently not scaling
+  # anything. Referencing the whole (possibly count = 0, when
+  # ollama_keda_enabled = false) resource here means: when it *is* enabled,
+  # the controller is guaranteed to exist before this module's ScaledObject
+  # is applied.
+  depends_on = [module.gpu_node_pool_ollama, helm_release.keda]
 }
 
 module "observability" {
@@ -255,4 +263,11 @@ module "observability" {
   aws_region                   = var.region
   eso_service_account_role_arn = aws_iam_role.external_secrets_grafana.arn
   tags                         = var.tags
+
+  # helm_release.external_secrets: same reasoning as model_serving_ollama's
+  # depends_on on helm_release.keda above -- this module's own
+  # SecretStore/ExternalSecret (kubernetes_manifest) resources need the ESO
+  # controller (and the CRDs its chart installs) to exist first, or they'd
+  # apply successfully but sit unreconciled.
+  depends_on = [helm_release.external_secrets]
 }

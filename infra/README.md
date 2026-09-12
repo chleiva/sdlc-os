@@ -89,8 +89,11 @@ module's README/comments rather than silently present:
    declares a real External Secrets Operator `SecretStore`/
    `ExternalSecret` (opt-in via `external_secrets_enabled`, on by
    default in `pilot-aws-g7e`). ESO's own controller is a cluster-wide
-   prerequisite this module does not install — see
-   `modules/observability/README.md`.
+   prerequisite the *module* does not install (a reusability property,
+   not a gap) — see `modules/observability/README.md` — but
+   `pilot-aws-g7e` itself now installs it for real, via `eks.tf`'s
+   `helm_release.external_secrets`, so a clone-and-`tofu apply` of that
+   environment specifically needs no separate manual step for this.
 7. `scripts/smoke-test.sh` runs real infra-level checks (Helm release
    status, a live round-trip against the model-serving endpoint) but the
    actual §20.1 evaluation-suite subset is D7's deliverable — the script
@@ -111,10 +114,18 @@ module's README/comments rather than silently present:
    tool-call surface and a Python library, no plain HTTP+JSON endpoint.
    Flagged explicitly rather than invented; `ollama_keda_enabled`
    defaults to `false` in `pilot-aws-g7e` until it's built.
-10. KEDA's own controller is a new cluster-wide prerequisite introduced
-    by `model-serving-ollama`, alongside the pre-existing
-    Karpenter-controller assumption — neither is installed by any
-    module in this tree.
+10. ~~KEDA's own controller is a new cluster-wide prerequisite introduced
+    by `model-serving-ollama`~~ — **closed for `pilot-aws-g7e`**:
+    that environment now installs both KEDA (`helm_release.keda`, gated
+    on `var.ollama_enabled && var.ollama_keda_enabled`) and Karpenter
+    (pre-existing `helm_release.karpenter`) for real, in `eks.tf`. Neither
+    `model-serving-ollama` nor `gpu-node-pool/aws` installs its own
+    controller *itself* — that remains deliberate (a reusable module
+    shouldn't assume it owns cluster-wide add-on installs), but
+    `pilot-aws-g7e`'s own composition now closes the gap end to end, so a
+    fresh clone of this repo genuinely only needs `tofu apply` against
+    that environment, no separate manual `helm install` step for either
+    controller.
 
 **Nothing in this tree was run against a real cloud account** (no AWS
 credentials, no live cluster, in this build environment) — every module

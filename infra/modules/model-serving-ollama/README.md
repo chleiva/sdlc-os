@@ -217,7 +217,13 @@ since there is no real endpoint yet to authenticate against.
 - **KEDA's controller** must already be installed on the cluster, via
   its own Helm chart, cluster-wide — same assumption
   `modules/gpu-node-pool/aws` makes about Karpenter's controller. This
-  module only declares the per-tenant `ScaledObject` CRD instance.
+  module only declares the per-tenant `ScaledObject` CRD instance; it does
+  not install the controller itself, and a different environment
+  composition than `pilot-aws-g7e` would need to install one of its own.
+  (`pilot-aws-g7e` itself now closes this for its own deployment — see
+  that environment's `eks.tf`, `helm_release.keda` — gated on
+  `var.ollama_enabled && var.ollama_keda_enabled`, same as this tier's own
+  `ScaledObject`.)
 - **`gpu-node-pool/aws`'s spot-only NodePool instance** for this tier
   (see that module's README "Spot-only, scale-to-zero pools") must exist
   and its `node_pool_name` output must be passed to `var.node_pool_name`

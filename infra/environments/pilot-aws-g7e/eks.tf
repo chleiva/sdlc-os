@@ -525,3 +525,49 @@ resource "helm_release" "karpenter" {
 
   depends_on = [aws_eks_node_group.system]
 }
+
+# --- KEDA and External Secrets Operator controllers -----------------------
+#
+# Until now, both were documented as human-installed prerequisites (see
+# modules/model-serving-ollama/README.md and modules/observability/README.md)
+# -- a real gap in the "clone this repo, run `tofu apply`, nothing else"
+# promise, since a missing controller doesn't fail loudly at apply time: the
+# ScaledObject/ExternalSecret CRDs this repo's own modules create would just
+# sit there unreconciled with no controller watching them. Installed here,
+# same `helm_release` pattern as Karpenter above (no pinned chart `version`,
+# same as Karpenter's install above -- this repo's existing convention for
+# cluster-wide addon installs on this pilot environment; pin one before any
+# non-pilot use, same caveat as image_tag = "latest" elsewhere in this repo).
+
+resource "helm_release" "keda" {
+  count = var.ollama_enabled && var.ollama_keda_enabled ? 1 : 0
+
+  name             = "keda"
+  repository       = "https://kedacore.github.io/charts"
+  chart            = "keda"
+  namespace        = "keda"
+  create_namespace = true
+
+  depends_on = [aws_eks_node_group.system]
+}
+
+resource "helm_release" "external_secrets" {
+  name             = "external-secrets"
+  repository       = "https://charts.external-secrets.io"
+  chart            = "external-secrets"
+  namespace        = "external-secrets"
+  create_namespace = true
+
+  # Installs the SecretStore/ExternalSecret CRDs the controller itself
+  # needs -- modules/observability's own SecretStore/ExternalSecret
+  # resources (kubernetes_manifest) would otherwise fail to apply against
+  # a cluster where these CRDs don't exist yet.
+  set = [
+    {
+      name  = "installCRDs"
+      value = "true"
+    },
+  ]
+
+  depends_on = [aws_eks_node_group.system]
+}

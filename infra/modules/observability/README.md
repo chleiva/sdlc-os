@@ -16,13 +16,17 @@ referenced by name but nothing syncs it").
 
 ### Prerequisite: ESO's controller
 
-Same pattern as `gpu-node-pool/aws`'s Karpenter assumption and this
-deliverable's KEDA assumption: **External Secrets Operator's controller
-(CRDs + controller Deployment) is assumed already installed on the
-cluster**, cluster-wide, via its own Helm chart — not installed by this
-module. This module only declares the per-namespace `SecretStore` and
-`ExternalSecret` CRD instances that tell an already-running ESO
-controller what to sync.
+Same pattern as `gpu-node-pool/aws`'s Karpenter assumption and
+`model-serving-ollama`'s KEDA assumption: **External Secrets Operator's
+controller (CRDs + controller Deployment) is assumed already installed on
+the cluster**, cluster-wide, via its own Helm chart — not installed by
+this module. This module only declares the per-namespace `SecretStore`
+and `ExternalSecret` CRD instances that tell an already-running ESO
+controller what to sync; a different environment composition than
+`pilot-aws-g7e` would need to install ESO's controller itself.
+(`pilot-aws-g7e` now closes this for its own deployment — see that
+environment's `eks.tf`, `helm_release.external_secrets`, installed
+unconditionally since `external_secrets_enabled = true` there.)
 
 ### IRSA wiring
 
