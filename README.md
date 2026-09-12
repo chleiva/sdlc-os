@@ -1,5 +1,8 @@
 # SDLC Auto
 
+[![CI](https://github.com/chleiva/sdlc-os/actions/workflows/ci.yml/badge.svg)](https://github.com/chleiva/sdlc-os/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 An open-source, self-hosted, multi-tenant platform for running AI coding
 agents against a real software development lifecycle — intake from a
 ticket, research, plan, human approval, implementation, automated
@@ -129,9 +132,12 @@ CLI) — see `infra/README.md`.
 
 ## Contributing
 
-See `CLAUDE.md` for repo conventions (this doubles as the guide
+See `CONTRIBUTING.md` for how to propose a change, and `CLAUDE.md` for
+repo conventions (this doubles as the guide
 [Claude Code](https://claude.com/claude-code) or any other coding agent
-should follow when working in this repo).
+should follow when working in this repo). Please report suspected
+security vulnerabilities per `SECURITY.md` rather than in a public
+issue. This project follows a [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

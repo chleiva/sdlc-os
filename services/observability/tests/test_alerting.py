@@ -86,10 +86,22 @@ def test_stuck_and_budget_threshold_alerts_both_reach_the_alert_sink(tmp_path, t
     budget = DEFAULT_BUDGETS["S"]
     future_time = datetime.now(timezone.utc) + timedelta(minutes=budget.wall_clock_minutes)
 
+    # Real-live-run fix (see orchestrator/core.py's _implementation_step
+    # and test_elicitation_pause_resume.py's matching comment): once a
+    # verification failure loops back to IMPLEMENTATION with no plan
+    # subtask left to run, the agent now gets one real "fix-up"
+    # implement_subtask call carrying the failure summary, on every
+    # retry under the budget -- not just silently re-verifying the same
+    # code. This run's subtask is marked complete by hand below (never
+    # goes through implement_subtask itself), so the two scripted diffs
+    # here are exactly the fix-up calls for "fail 1" and "fail 2" (the
+    # 3rd failure crosses DEFAULT_STUCK_RETRY_BUDGET and pauses on the
+    # stuck checkpoint before a corresponding fix-up would run).
+    fixup_diff = DiffOutput(files_touched=("src/a.py",), lines_changed=1, commit_message="fix-up")
     orch = Orchestrator(
         registry=registry,
         tenant_id=tenant_id,
-        agent_backend=ScriptedAgentBackend(plans=[_one_subtask_high_risk_plan()]),
+        agent_backend=ScriptedAgentBackend(plans=[_one_subtask_high_risk_plan()], diffs=[fixup_diff, fixup_diff]),
         verification_runner=failing_verifier,
         plan_store=plan_store,
         progress_store=progress_store,

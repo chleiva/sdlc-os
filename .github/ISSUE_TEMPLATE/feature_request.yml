@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a new capability or a change to how something works
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing something new, check `CLAUDE.md`'s "Known
+        cross-deliverable gaps" — several likely-obvious asks (a real
+        orchestrator process entrypoint, a network-reachable Run
+        Registry, real Jira webhook wiring) are already tracked there
+        as known, deliberate gaps rather than missed features.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: What can't you do today, or what's awkward, and why it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Which `services/<name>` (or `infra/`) this touches, and roughly how.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

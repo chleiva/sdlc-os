@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in a service or the IaC doesn't work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. If this is a security vulnerability
+        (cross-tenant isolation, sandbox escape, credential handling —
+        see SECURITY.md for the full list), please use [private
+        vulnerability reporting](https://github.com/chleiva/sdlc-os/security/advisories/new)
+        instead of a public issue.
+
+  - type: input
+    id: component
+    attributes:
+      label: Affected component
+      description: Which `services/<name>` (or `infra/`) directory
+      placeholder: services/orchestrator
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the exact command you ran and the exact output/traceback.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include the install sequence you used — check that service's own README first, several need a specific sibling-install order.
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "OS, Python version, and whether this is the Docker Compose mode or the multi-tenant cloud mode"

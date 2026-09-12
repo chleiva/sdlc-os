@@ -1,0 +1,212 @@
+# CI for SDLC Auto.
+#
+# One job per `services/<name>` package, each installed and tested from
+# a clean checkout exactly the way that service's own README documents
+# (including its real sibling-package install order/quirks -- see
+# CLAUDE.md's "Real code, mocked external boundary" convention and each
+# service's own README for the rationale behind its particular sequence).
+# Jobs run independently and in parallel: every sibling dependency is
+# installed straight from this checkout's source, so no job depends on
+# another job having built anything first.
+#
+# Also validates the Docker Compose packaging (D14) parses cleanly and
+# that `infra/`'s OpenTofu is correctly formatted -- neither requires a
+# live cloud account or Docker build.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  service-tests:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: run-registry
+            dir: services/run-registry
+            run: |
+              python3 -m venv .venv
+              ./.venv/bin/pip install -e ".[dev]"
+              ./.venv/bin/python -m pytest -v
+
+          - name: kms-boundary
+            dir: services/kms-boundary
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install --upgrade pip
+              .venv/bin/pip install -e ".[dev]"
+              .venv/bin/python -m pytest -v
+
+          - name: mcp-stubs
+            dir: services/mcp-stubs
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -r requirements.txt
+              .venv/bin/python3 -m pytest -q
+
+          - name: index-server
+            dir: services/index-server
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -r requirements.txt
+              .venv/bin/python -m pytest -q
+
+          - name: issue-tracker
+            dir: services/issue-tracker
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ../kms-boundary
+              .venv/bin/pip install -e ".[dev]"
+              .venv/bin/python -m pytest -q
+
+          - name: source-control
+            dir: services/source-control
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ".[dev]"
+              .venv/bin/python -m pytest -v
+
+          - name: orchestrator
+            dir: services/orchestrator
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ".[dev]" -e ../run-registry
+              .venv/bin/python -m pytest tests/ -v
+
+          - name: job-dispatcher
+            dir: services/job-dispatcher
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install --upgrade pip
+              .venv/bin/pip install -e ../run-registry
+              .venv/bin/pip install -e ../kms-boundary
+              .venv/bin/pip install -e ../issue-tracker
+              .venv/bin/pip install -e ".[dev]"
+              # pip's own resolution above can silently reinstall these
+              # local path deps non-editably as a side effect -- reassert:
+              .venv/bin/pip install -e ../run-registry --force-reinstall --no-deps
+              .venv/bin/pip install -e ../issue-tracker --force-reinstall --no-deps
+              .venv/bin/python -m pytest -v
+
+          - name: fleet-dashboard
+            dir: services/fleet-dashboard
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install --upgrade pip
+              .venv/bin/pip install -e ../run-registry
+              .venv/bin/pip install -e ".[dev]"
+              .venv/bin/pip install -e ../run-registry --force-reinstall --no-deps
+              .venv/bin/pytest -q
+
+          - name: tenant-cell
+            dir: services/tenant-cell
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ../run-registry
+              .venv/bin/pip install -e ".[dev]"
+              .venv/bin/python -m pytest -q
+
+          - name: verification-pipeline
+            dir: services/verification-pipeline
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -r requirements.txt
+              .venv/bin/python3 -m pytest -q
+
+          - name: gates
+            dir: services/gates
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ../kms-boundary
+              .venv/bin/pip install -e ".[dev]" \
+                -e ../run-registry \
+                -e ../orchestrator \
+                -e ../issue-tracker \
+                -e ../index-server \
+                -e ../source-control
+              .venv/bin/python -m pytest tests/ -v
+
+          - name: security-hardening
+            dir: services/security-hardening
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install --upgrade pip
+              for pkg in run-registry kms-boundary issue-tracker job-dispatcher orchestrator \
+                         index-server source-control tenant-cell fleet-dashboard \
+                         verification-pipeline gates; do
+                .venv/bin/pip install -e ../$pkg
+              done
+              .venv/bin/pip install -e ".[dev]"
+              for pkg in run-registry kms-boundary issue-tracker job-dispatcher orchestrator \
+                         index-server source-control tenant-cell fleet-dashboard \
+                         verification-pipeline gates; do
+                .venv/bin/pip install -e ../$pkg --force-reinstall --no-deps
+              done
+              .venv/bin/python -m pytest tests/ -v
+
+          - name: observability
+            dir: services/observability
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ../run-registry -e ../issue-tracker -e ../orchestrator -e ../tenant-cell
+              .venv/bin/pip install --no-deps -e ../job-dispatcher
+              .venv/bin/pip install -e ".[dev]" --no-deps
+              .venv/bin/pip install pytest opentelemetry-api==1.44.0 opentelemetry-sdk==1.44.0 mcp==2.2.0 jsonschema anyio
+              .venv/bin/python -m pytest tests/ -v
+
+          - name: evaluation-harness
+            dir: services/evaluation-harness
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ../run-registry
+              .venv/bin/pip install -e . --no-deps
+              .venv/bin/pip install pytest
+              .venv/bin/python -m pytest -q
+
+          - name: platform-release
+            dir: services/platform-release
+            needs_tofu: true
+            run: |
+              python3 -m venv .venv
+              .venv/bin/pip install -e ".[dev]"
+              .venv/bin/python -m pytest -q
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up OpenTofu
+        if: matrix.needs_tofu
+        uses: opentofu/setup-opentofu@v1
+
+      - name: Install & test
+        working-directory: ${{ matrix.dir }}
+        run: ${{ matrix.run }}
+
+  docker-compose-config:
+    name: docker-compose config validates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: docker compose -f docker-compose.yml config --quiet
+
+  infra-fmt:
+    name: infra/ tofu fmt check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+      - run: tofu fmt -check -recursive infra/

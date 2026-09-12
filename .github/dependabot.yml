@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # Keep the CI workflow's own actions up to date.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Every services/<name> package's own pinned third-party dependencies
+  # (requirements.txt or pyproject.toml). Sibling in-repo packages
+  # (file:../other-service) aren't PyPI releases and Dependabot doesn't
+  # touch them; a directory with no manifest is silently skipped.
+  - package-ecosystem: "pip"
+    directories:
+      - "/services/*"
+    schedule:
+      interval: "weekly"
+
+  # infra/'s own OpenTofu provider version pins.
+  - package-ecosystem: "terraform"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+
+  # Docker base images used by each service's Dockerfile (only some
+  # services have one -- see docker-compose.yml's own top comment for
+  # which are actually part of the compose stack; a directory with no
+  # Dockerfile is silently skipped).
+  - package-ecosystem: "docker"
+    directories:
+      - "/services/*"
+    schedule:
+      interval: "weekly"
