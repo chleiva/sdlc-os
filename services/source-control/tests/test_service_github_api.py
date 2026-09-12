@@ -6,7 +6,6 @@ same client code path that would hit api.github.com."""
 from __future__ import annotations
 
 import base64
-from pathlib import Path
 
 import pytest
 

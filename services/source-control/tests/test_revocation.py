@@ -73,7 +73,7 @@ def test_previously_cached_token_is_evicted_once_the_installation_is_revoked(
     server, _ = mock_github
 
     # Token issued while installation is live.
-    token_before = github_client.token_cache.get_token("inst-x")
+    github_client.token_cache.get_token("inst-x")
     assert "inst-x" in server.state.issued_tokens.values()
 
     # Now the org admin uninstalls the App (or GitHub invalidates the

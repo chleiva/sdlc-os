@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import time
 
-from source_control.app_auth import InstallationTokenCache, generate_app_jwt
-from source_control.github_client import AppCredentials, GitHubAppClient
+from source_control.app_auth import generate_app_jwt
+from source_control.github_client import GitHubAppClient
 
 
 def test_app_jwt_is_signed_and_accepted_by_a_real_rs256_verifier(rsa_keypair):
