@@ -24,3 +24,9 @@ packages = ["src/platform_release"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+# tests/fixtures/ holds deliberately-passing and deliberately-failing
+# fake service test suites that test_contract_ci.py runs *as subprocesses
+# via their own .venv* -- they must never be collected directly by this
+# package's own top-level pytest run (that would both double-run them
+# and fail this suite on the fixture that is supposed to fail).
+norecursedirs = ["fixtures", ".venv"]
