@@ -181,7 +181,7 @@ jobs:
               .venv/bin/python -m pytest -q
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -199,7 +199,7 @@ jobs:
     name: docker-compose config validates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: docker compose config
         run: docker compose -f docker-compose.yml config --quiet
 
@@ -207,6 +207,6 @@ jobs:
     name: infra/ tofu fmt check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: opentofu/setup-opentofu@v1
       - run: tofu fmt -check -recursive infra/
