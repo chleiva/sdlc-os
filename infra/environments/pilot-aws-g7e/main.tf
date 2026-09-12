@@ -27,6 +27,21 @@ locals {
   # threaded into the other as if the two were the same string.
   ollama_node_pool_label = "ollama-gpu"
 
+  # Same reasoning as ollama_node_pool_label above, for the main (vLLM)
+  # GPU pool: gpu-node-pool/aws's `labels` variable defaults to
+  # {"sdlc-auto.io/node-pool" = "gpu"}, which is the value actually
+  # stamped on nodes and the value model_serving's nodeSelector must
+  # match -- not module.gpu_node_pool.node_pool_name (the NodePool
+  # *object's* name, e.g. "<environment>-gpu-node-pool"). Passing the
+  # latter into model_serving.node_pool_name, as this file originally
+  # did, produced a nodeSelector that could never match a real node: a
+  # real bug (found during the Ollama-tier build, when writing this same
+  # pattern for that tier surfaced the pre-existing main-pool version),
+  # confirmed independently via gpu-node-pool/aws's own `labels` default
+  # and model_serving's nodeSelector construction, fixed here rather than
+  # left in place now that a real deployment is the actual goal.
+  gpu_node_pool_label = "gpu"
+
   # Every node-role ARN Karpenter's controller must be allowed to
   # `iam:PassRole` to when launching an instance -- the main GPU pool's
   # role, plus the Ollama tier's own role when that tier is enabled. Used
@@ -85,6 +100,9 @@ module "gpu_node_pool" {
   min_size                   = 0
   max_size                   = 1
   desired_size               = 1
+  # Explicit rather than relying on the module's own default, matching
+  # the Ollama tier's pattern below -- see locals.gpu_node_pool_label.
+  labels = { "sdlc-auto.io/node-pool" = local.gpu_node_pool_label }
   # Closes infra/README.md known-gap #3: actually wires the firecracker
   # node-bootstrap script into the EC2NodeClass's userData, not just
   # leaving both modules independently declared.
@@ -150,7 +168,7 @@ module "model_serving" {
   tensor_parallel_size             = 1
   gpu_utilization_target           = 0.9
   replicas                         = 1
-  node_pool_name                   = module.gpu_node_pool.node_pool_name
+  node_pool_name                   = local.gpu_node_pool_label
   termination_grace_period_seconds = module.spot_lifecycle.warning_window_seconds - 30
   tags                             = var.tags
 }
