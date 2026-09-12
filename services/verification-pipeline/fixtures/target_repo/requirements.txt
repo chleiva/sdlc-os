@@ -1,0 +1,3 @@
+insecure-badpkg==1.0.0
+pyyaml==5.0
+requests==2.31.0

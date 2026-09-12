@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "D2: Agent Orchestrator Core (SDLC Auto, Wave 1)"
+requires-python = ">=3.11"
+# `run-registry` (F2) is a real, direct dependency -- installed from its
+# local path (`pip install -e ../run-registry`), not from a package
+# index, since it is a sibling in-repo deliverable, not a published
+# package. Not listed here because a plain `pip install .` would then try
+# (and fail) to resolve "run-registry" from PyPI; see README "Setup".
+dependencies = [
+    "mcp==2.2.0",
+    "jsonschema>=4.21",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orchestrator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

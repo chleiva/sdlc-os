@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "job-dispatcher"
+version = "0.1.0"
+description = "D1: Job Dispatcher, Tenant Resolution, Webhook Auth (SDLC Auto, Wave 1)"
+requires-python = ">=3.11"
+dependencies = [
+    # F2's Registry Service -- create_run is called ONLY through its
+    # public RegistryService API, never by touching its store directly.
+    "run-registry @ file:../run-registry",
+    # D4's real, tested webhook_signing (Sec. 17.3 HMAC verifier -- its
+    # own docstring says it is "standing in for D1's side" until D1
+    # exists; D1 is that consumer now) and its real jira_client/gating
+    # for posting the capacity-delay comment.
+    "issue-tracker @ file:../issue-tracker",
+    # No web framework dependency: the HTTP layer is stdlib
+    # http.server, kept dependency-light, same pattern as
+    # fleet-dashboard/issue-tracker's webhook_relay.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/job_dispatcher"]
+
+[tool.hatch.metadata]
+# Needed for the `file:../...` local path dependencies above.
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

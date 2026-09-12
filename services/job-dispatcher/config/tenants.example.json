@@ -1,0 +1,35 @@
+{
+  "tenants": [
+    {
+      "tenant_id": "tenant-acme",
+      "project_key": "PROJ",
+      "webhook_secret": "REPLACE-WITH-A-REAL-PER-TENANT-SECRET-tenant-acme",
+      "jira": {
+        "base_url": "https://api.atlassian.com/ex/jira/<cloud_id>",
+        "auth_mode": "oauth_bearer",
+        "oauth_bearer_token": "REPLACE-WITH-A-LIVE-OAUTH-BEARER-TOKEN",
+        "opt_in_label": "ai-factory",
+        "trigger_status": "Selected for Development",
+        "approval_status": "In Progress",
+        "change_review_status": "In Review",
+        "size_field_mode": "label",
+        "epic_link_mode": "parent"
+      }
+    },
+    {
+      "tenant_id": "tenant-globex",
+      "project_key": "GBX",
+      "webhook_secret": "REPLACE-WITH-A-REAL-PER-TENANT-SECRET-tenant-globex",
+      "jira": {
+        "base_url": "https://your-site.atlassian.net",
+        "auth_mode": "basic",
+        "basic_auth_email": "REPLACE@example.com",
+        "basic_auth_api_token": "REPLACE-WITH-A-LIVE-API-TOKEN",
+        "opt_in_label": "ai-factory",
+        "trigger_status": "Selected for Development",
+        "approval_status": "In Progress",
+        "change_review_status": "In Review"
+      }
+    }
+  ]
+}

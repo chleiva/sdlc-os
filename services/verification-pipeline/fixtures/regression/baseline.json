@@ -1,0 +1,8 @@
+{
+  "metric": "comparisons_for_30_item_nearly_sorted_input",
+  "value": 35,
+  "direction": "lower_is_better",
+  "tolerance_pct": 20,
+  "recorded_from": "fixtures/regression/good_impl.py:measure_comparisons",
+  "note": "Recorded by actually running good_impl.py's measure_comparisons on the fixed 30-item input used by tests/test_layer6_regression_check.py -- not a hand-picked number."
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tenant-cell"
+version = "0.1.0"
+description = "D6: Model Serving + Tenant Compute Cell Provisioning (control-logic service) for SDLC Auto (Wave 1)"
+requires-python = ">=3.11"
+dependencies = [
+    # run-registry is a sibling in-repo package (services/run-registry),
+    # not published anywhere -- there is no PyPI-resolvable version
+    # constraint to pin here. Install it into this project's environment
+    # with `pip install -e ../run-registry` (see README.md "Running the
+    # tests"); this dependencies list documents the *logical* dependency
+    # (F2's RegistryService is a real import, not vendored/duplicated)
+    # without claiming a install-from-index address that does not exist.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tenant_cell"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

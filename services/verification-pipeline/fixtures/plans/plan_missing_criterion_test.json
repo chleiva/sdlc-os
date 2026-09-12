@@ -1,0 +1,25 @@
+{
+  "story_id": "SDLC-4243",
+  "plan_document_ref": {"document_id": "plan-doc-SDLC-4243", "version": 1},
+  "declared_scope": {
+    "in_scope": ["src/sample_pkg/billing.py"],
+    "out_of_scope": []
+  },
+  "acceptance_criteria": [
+    {"id": "AC-1", "description": "compute_discount applies the given rate to the given price."},
+    {"id": "AC-2", "description": "compute_discount rejects a negative rate."}
+  ],
+  "acceptance_criteria_verification_map": [
+    {"criterion_id": "AC-1", "test_ids": ["tests/test_new_feature.py::test_compute_discount_applies_rate"]}
+  ],
+  "sub_task_graph": [
+    {"id": "T-1", "description": "Implement compute_discount", "depends_on": [], "parallelizable": false}
+  ],
+  "risk": {
+    "tier": "low",
+    "reasoning": "Small, self-contained pure function.",
+    "story_size": "S",
+    "budget": {"wall_clock_minutes": 30, "cost_ceiling_usd": 5, "size_checkpoint_lines": 150, "size_checkpoint_files": 5},
+    "rollback_strategy": "Revert the single commit adding compute_discount."
+  }
+}

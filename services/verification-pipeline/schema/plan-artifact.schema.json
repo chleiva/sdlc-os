@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sdlc-auto.internal/schemas/plan-artifact/0.1.0-d7-draft",
+  "title": "Plan Artifact (D7's interim schema, pending D2 reconciliation)",
+  "version": "0.1.0-d7-draft",
+  "description": "D7's own JSON Schema for the fields of master-spec Sec. 9.5's structured plan artifact that the verification pipeline actually consumes: declared scope, the acceptance-criteria-to-verification map, the sub-task graph, and risk classification/budget. This is NOT D2's schema -- D2 (the orchestrator, which owns/generates the real plan artifact) is being built concurrently and was not available to import from. This schema is built directly from Sec. 9.5's prose so D7 is not blocked, and MUST be reconciled against whatever field names/shapes D2 actually emits once it lands (see services/verification-pipeline/README.md's 'Plan artifact schema reconciliation' section for the exact flag).",
+  "type": "object",
+  "required": [
+    "story_id",
+    "plan_document_ref",
+    "declared_scope",
+    "acceptance_criteria",
+    "acceptance_criteria_verification_map",
+    "sub_task_graph",
+    "risk"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "story_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The story/issue this plan artifact belongs to (Sec. 4.4's intake identifier)."
+    },
+    "plan_document_ref": {
+      "type": "object",
+      "description": "Version pin to the human-readable plan document (Sec. 9.1) this artifact is the machine-checkable shadow of (Sec. 9.5): 'generated at the same time and re-generated, not hand-edited, whenever the human-readable plan changes at a Sec. 9.2 gate.'",
+      "required": ["document_id", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "declared_scope": {
+      "type": "object",
+      "description": "Sec. 9.5: 'an explicit list of files/modules/packages the plan expects to touch, and an explicit list of what is out of scope -- the literal set the Sec. 9.3 risk checkpoint diffs the in-progress change against.'",
+      "required": ["in_scope", "out_of_scope"],
+      "additionalProperties": false,
+      "properties": {
+        "in_scope": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "description": "Glob-style file/module/package patterns the plan expects to touch."
+        },
+        "out_of_scope": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Explicitly out-of-scope areas (Sec. 9.1), may be empty."
+        }
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Sec. 9.1's restated acceptance criteria, each independently identifiable so Sec. 11.1's new/updated-tests layer can check completeness of the map below.",
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "acceptance_criteria_verification_map": {
+      "type": "array",
+      "description": "Sec. 9.5: 'each acceptance criterion paired with the specific new/updated test(s) that will demonstrate it, populated before implementation starts and checked for completeness by Sec. 11.1's new/updated tests layer.' Every acceptance_criteria[].id must appear as a criterion_id here with at least one non-empty test_id.",
+      "items": {
+        "type": "object",
+        "required": ["criterion_id", "test_ids"],
+        "additionalProperties": false,
+        "properties": {
+          "criterion_id": {"type": "string", "minLength": 1},
+          "test_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": "pytest node IDs (or equivalent) for the new/updated test(s) demonstrating this criterion."
+          },
+          "crosses_module_boundary": {
+            "type": "boolean",
+            "default": false,
+            "description": "Sec. 9.1/11.1: true when this criterion's change crosses a module/service boundary, requiring an integration test in addition to unit test(s)."
+          }
+        }
+      }
+    },
+    "sub_task_graph": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Sec. 9.5: 'the task breakdown as a set of named sub-tasks with their parallel/sequential relationship (Sec. 8.2), which is what a multi-agent topology actually schedules against.'",
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "depends_on", "parallelizable"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1},
+          "depends_on": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "parallelizable": {"type": "boolean"}
+        }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "description": "Sec. 9.5: 'the Sec. 12 risk tier and the Sec. 9.4 budget it resolves to, pinned at approval time so a later re-plan is a visible, logged change to this artifact, not a silent drift.'",
+      "required": ["tier", "reasoning", "story_size", "budget"],
+      "additionalProperties": false,
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "cross-cutting"],
+          "description": "Sec. 12's risk classification; 'high' and 'cross-cutting' route to the adversarial verifier (Sec. 8.4) for layer 5, per the D7 brief."
+        },
+        "reasoning": {"type": "string", "minLength": 1},
+        "story_size": {
+          "type": "string",
+          "enum": ["S", "M", "L", "XL"],
+          "description": "Sec. 4.3 sizing. XL is a decomposition signal (Sec. 9.4) -- the pipeline refuses to execute an XL plan artifact directly."
+        },
+        "budget": {
+          "type": "object",
+          "description": "Sec. 9.4's pinned defaults for this story_size, copied onto the artifact at approval time (not re-derived later, so a later config change doesn't silently rewrite an already-approved plan's budget).",
+          "required": ["wall_clock_minutes", "cost_ceiling_usd", "size_checkpoint_lines", "size_checkpoint_files"],
+          "additionalProperties": false,
+          "properties": {
+            "wall_clock_minutes": {"type": "number", "exclusiveMinimum": 0},
+            "cost_ceiling_usd": {"type": "number", "exclusiveMinimum": 0},
+            "size_checkpoint_lines": {"type": "integer", "exclusiveMinimum": 0},
+            "size_checkpoint_files": {"type": "integer", "exclusiveMinimum": 0}
+          }
+        },
+        "rollback_strategy": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
