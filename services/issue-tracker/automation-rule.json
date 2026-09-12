@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "purpose": "Jira Automation rule config for the D4/Sec. 4.4 trigger integration -- import-assisted, not hand-reconstructed from prose.",
+    "schema_note": "Modeled on Atlassian's own 'Export rule' JSON shape for Automation for Jira (Cloud). Atlassian does not publish this export format as a stable, versioned public schema, so a human importing this MUST verify it imports cleanly in their org's Jira instance (Project settings -> Automation -> ... -> Import rule) and adjust field names if their Jira Cloud version has drifted from this shape. If import fails, SETUP.md gives the exact manual click-through steps to reconstruct this rule by hand from the values below -- the values (trigger status, opt-in label, target URL, headers) are the authoritative part; the exact JSON envelope around them is best-effort.",
+    "placeholders_a_human_must_fill_in": [
+      "<JIRA_PROJECT_KEY>",
+      "<TRIGGER_STATUS>",
+      "<OPT_IN_LABEL>",
+      "<TENANT_ID>",
+      "<WEBHOOK_RELAY_URL>"
+    ]
+  },
+  "rule": {
+    "name": "SDLC Auto: dispatch opted-in story on trigger-status transition",
+    "state": "ENABLED",
+    "description": "Fires when a story enters the team's existing 'queued and ready to start' status AND carries the ai-factory opt-in label. Sends an unsigned (TLS-only) web request to D4's webhook relay, which independently re-verifies the opt-in label via get-issue, computes the Sec. 17.3 per-tenant HMAC signature, and forwards a signed dispatch to D1's job-dispatcher endpoint. See services/issue-tracker/SETUP.md for why this extra hop exists (native Jira Automation cannot compute an HMAC signature at send-time).",
+    "scope": {
+      "projects": ["<JIRA_PROJECT_KEY>"]
+    },
+    "trigger": {
+      "component": "TRIGGER",
+      "schemaVersion": 1,
+      "type": "jira.issue.event.trigger:issue-transitioned",
+      "value": {
+        "description": "Issue transitioned (any transition; the CONDITION below narrows to the specific target status)."
+      }
+    },
+    "components": [
+      {
+        "component": "CONDITION",
+        "schemaVersion": 1,
+        "type": "jira.jql.condition",
+        "value": {
+          "description": "Status matches the configured trigger status AND the opt-in label is present. Both must hold -- being in the trigger status alone is never sufficient (master spec Sec. 4.4).",
+          "jql": "status = \"<TRIGGER_STATUS>\" AND labels = \"<OPT_IN_LABEL>\""
+        }
+      },
+      {
+        "component": "ACTION",
+        "schemaVersion": 1,
+        "type": "jira.issue.outgoing.webhook",
+        "value": {
+          "description": "Send a web request to D4's webhook relay (see webhook_relay.py) -- not directly to D1 -- because the relay is what computes the real Sec. 17.3 HMAC signature D1 verifies; Jira Automation's native action cannot compute that signature itself.",
+          "url": "<WEBHOOK_RELAY_URL>",
+          "method": "POST",
+          "headers": [
+            {"name": "Content-Type", "value": "application/json"}
+          ],
+          "body": "CUSTOM_DATA",
+          "customData": {
+            "tenant_id": "<TENANT_ID>",
+            "issue_key": "{{issue.key}}",
+            "project_key": "{{issue.project.key}}"
+          },
+          "waitForResponse": true
+        }
+      }
+    ]
+  }
+}

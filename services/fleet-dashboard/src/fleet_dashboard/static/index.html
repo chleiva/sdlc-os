@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fleet Control Dashboard</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 16px 20px; background: #f5f6f8; color: #1a1a1a; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 12px; margin-bottom: 12px; }
+  .staleness { background: #fff8e1; border: 1px solid #e6c200; border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-bottom: 14px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; align-items: center; }
+  .controls input, .controls select { padding: 4px 6px; font-size: 12px; }
+  .board { display: flex; gap: 12px; overflow-x: auto; }
+  .column { flex: 1 1 0; min-width: 220px; background: #ececec; border-radius: 8px; padding: 8px; }
+  .column h2 { font-size: 13px; margin: 2px 4px 8px; display: flex; justify-content: space-between; }
+  .card { background: #fff; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); font-size: 12px; }
+  .card .repo { font-weight: 600; }
+  .card .row { margin-top: 4px; color: #333; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; margin-left: 4px; }
+  .badge.spot { background: #e0f2ff; color: #075985; }
+  .badge.on_demand { background: #e6ffed; color: #14532d; }
+  .badge.bounced { background: #ffe0e0; color: #7a0d0d; font-weight: 600; }
+  .budget-bar { height: 6px; background: #ddd; border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  .budget-bar > div { height: 100%; background: #4c8bf5; }
+  .budget-bar > div.over { background: #d64545; }
+  .trace-link { font-size: 11px; }
+  .empty-col { color: #999; font-size: 11px; padding: 8px; }
+  .err { color: #a11; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>Fleet Control Dashboard</h1>
+  <div class="sub">Read-only view over the Run Registry (F2). Not a source of truth for stage transitions.</div>
+  <div class="staleness" id="staleness">Not polled yet.</div>
+  <div class="controls">
+    <label>Viewer token:
+      <input id="token" type="text" placeholder="demo-viewer-a" />
+    </label>
+    <label>Repository: <input id="f-repo" type="text" placeholder="(any)"></label>
+    <label>Team: <input id="f-team" type="text" placeholder="(any)"></label>
+    <label>Cloud: <input id="f-cloud" type="text" placeholder="(any)"></label>
+    <button id="apply">Apply</button>
+  </div>
+  <div id="error" class="err"></div>
+  <div class="board" id="board"></div>
+
+<script>
+const COLUMNS = ["Analysis", "Design", "Development", "Testing", "PR Review", "Commit"];
+let pollTimer = null;
+
+function qs() {
+  const params = new URLSearchParams();
+  const token = document.getElementById('token').value.trim();
+  const repo = document.getElementById('f-repo').value.trim();
+  const team = document.getElementById('f-team').value.trim();
+  const cloud = document.getElementById('f-cloud').value.trim();
+  if (token) params.set('token', token);
+  if (repo) params.set('repository', repo);
+  if (team) params.set('team', team);
+  if (cloud) params.set('cloud', cloud);
+  return params.toString();
+}
+
+function fmtSeconds(s) {
+  s = Math.round(s);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+function renderCard(card) {
+  const div = document.createElement('div');
+  div.className = 'card';
+  const budgetPct = Math.min(1, card.budget_fraction) * 100;
+  const overBudget = card.budget_fraction > 1;
+  let extra = '';
+  if (card.column === 'Development') {
+    extra += `<div class="row">checkpoints observed: ${card.checkpoint_count_observed}
+      <span class="badge ${card.capacity_class}">${card.capacity_class}</span></div>`;
+    if (card.bounced_back_from_testing) {
+      extra += `<div class="row"><span class="badge bounced">&#8629; back from Testing (verification failed)</span></div>`;
+    }
+  }
+  div.innerHTML = `
+    <div class="repo">${card.repository}</div>
+    <div class="row">${card.jira_issue}${card.team ? ' &middot; team ' + card.team : ''}</div>
+    <div class="row">${card.cloud || '?'} / ${card.region_az || '?'} / ${card.node_id || '?'}</div>
+    <div class="row">stage: <b>${card.stage}</b>
+      ${card.elapsed_in_stage_is_exact ? '' : ' <i>(elapsed is a lower bound -- run pre-dates this dashboard session)</i>'}
+    </div>
+    <div class="row">elapsed in stage: ${fmtSeconds(card.elapsed_in_stage_seconds)}
+      vs. Sec 9.4 M-default budget ${fmtSeconds(card.reference_budget_seconds)}</div>
+    <div class="budget-bar"><div style="width:${budgetPct}%" class="${overBudget ? 'over' : ''}"></div></div>
+    ${extra}
+    <div class="row trace-link"><a href="${card.trace_url}" target="_blank" rel="noopener">full trace &rarr;</a></div>
+    <div class="row" style="color:#888;">registry updated: ${card.registry_updated_at}</div>
+  `;
+  return div;
+}
+
+function render(data) {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  const byColumn = {};
+  for (const c of COLUMNS) byColumn[c] = [];
+  for (const card of data.cards) {
+    (byColumn[card.column] = byColumn[card.column] || []).push(card);
+  }
+  for (const col of COLUMNS) {
+    const colDiv = document.createElement('div');
+    colDiv.className = 'column';
+    const cards = byColumn[col] || [];
+    colDiv.innerHTML = `<h2>${col}<span>${cards.length}</span></h2>`;
+    if (cards.length === 0) {
+      const e = document.createElement('div');
+      e.className = 'empty-col';
+      e.textContent = 'No runs';
+      colDiv.appendChild(e);
+    }
+    for (const card of cards) colDiv.appendChild(renderCard(card));
+    board.appendChild(colDiv);
+  }
+  const staleness = document.getElementById('staleness');
+  staleness.textContent =
+    `Last polled at ${data.polled_at} (server polls every ${data.poll_interval_seconds}s). ` +
+    `This view lags the Run Registry by up to one poll interval -- it is NOT a live feed. ` +
+    `Viewing tenant(s): ${data.tenant_ids_viewed.join(', ') || '(none authorized)'}.`;
+}
+
+async function poll() {
+  const errDiv = document.getElementById('error');
+  try {
+    const res = await fetch('/api/cards?' + qs());
+    const data = await res.json();
+    if (!res.ok) {
+      errDiv.textContent = data.error || `HTTP ${res.status}`;
+      return;
+    }
+    errDiv.textContent = '';
+    render(data);
+    if (data.poll_interval_seconds && pollTimer) {
+      // keep interval in sync with what the server declares
+    }
+  } catch (e) {
+    errDiv.textContent = String(e);
+  }
+}
+
+document.getElementById('apply').addEventListener('click', () => { poll(); });
+
+poll();
+pollTimer = setInterval(poll, 3000);
+</script>
+</body>
+</html>

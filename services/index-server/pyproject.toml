@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "index-server"
+version = "0.1.0"
+description = "D3: Repository Index Server (SDLC Auto, Wave 1) -- real implementation of F3's index MCP contract."
+requires-python = ">=3.11"
+dependencies = [
+    "mcp==2.2.0",
+    "jsonschema==4.26.0",
+    "anyio==4.15.1",
+    "tree-sitter==0.26.0",
+    "tree-sitter-python==0.25.0",
+    "tree-sitter-typescript==0.23.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/index_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

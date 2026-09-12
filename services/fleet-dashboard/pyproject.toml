@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fleet-dashboard"
+version = "0.1.0"
+description = "D8: Fleet Control Dashboard -- read-only Kanban view over the Run Registry (SDLC Auto, Wave 1)"
+requires-python = ">=3.11"
+dependencies = [
+    # Local path dependency on F2's Registry Service -- we read run/attempt
+    # state ONLY through its public RegistryService API, never by opening
+    # its SQLite file directly (see tests/test_no_direct_db_access.py).
+    # No web framework dependency: the HTTP layer is stdlib
+    # http.server, kept dependency-light per this deliverable's brief.
+    "run-registry @ file:../run-registry",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fleet_dashboard"]
+
+[tool.hatch.metadata]
+# Needed for the `run-registry @ file:../run-registry` local path
+# dependency above (F2's Registry Service, consumed read-only).
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

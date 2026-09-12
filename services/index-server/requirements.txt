@@ -1,0 +1,18 @@
+# D3 Repository Index Server -- real implementation.
+#
+# Pinned to the same mcp/jsonschema/anyio/pytest versions as
+# services/mcp-stubs (see that package's requirements.txt for the
+# rationale on the mcp==2.x pin -- Sec. 7.5's MCP rewrite target).
+#
+# tree-sitter + per-language grammar packages are the deterministic
+# parsing layer (Sec. 6.2): tree-sitter-python for Python, and
+# tree-sitter-typescript for TypeScript, the second language this
+# server indexes (see README/engine/languages.py for why TypeScript
+# was chosen over Go).
+mcp==2.2.0
+jsonschema==4.26.0
+anyio==4.15.1
+pytest==9.1.1
+tree-sitter==0.26.0
+tree-sitter-python==0.25.0
+tree-sitter-typescript==0.23.2
