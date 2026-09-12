@@ -51,6 +51,29 @@ locals {
     [module.gpu_node_pool.node_role_arn],
     var.ollama_enabled ? [module.gpu_node_pool_ollama[0].node_role_arn] : []
   )
+
+  # --- Ollama model-cache restore from S3 (see
+  # modules/model-serving-ollama/README.md "Restoring the model cache
+  # from S3") -- parses var.ollama_model_cache_s3_uri into the
+  # bucket/prefix eks.tf's least-privilege IAM policy scopes itself to.
+  # Off unless both ollama_enabled and ollama_model_cache_s3_uri are set;
+  # this local is what actually gates the IAM role/policy in eks.tf and
+  # the module.model_serving_ollama wiring below.
+  ollama_model_cache_s3_enabled = var.ollama_enabled && var.ollama_model_cache_s3_uri != null && var.ollama_model_cache_s3_uri != ""
+
+  # regex("^s3://([^/]+)/?(.*)$", ...) -> [bucket, prefix-without-leading-slash].
+  # Guarded by the enabled flag above so an unset/null URI never reaches
+  # regex() (which would error on a non-matching/empty string).
+  ollama_model_cache_s3_parts   = local.ollama_model_cache_s3_enabled ? regex("^s3://([^/]+)/?(.*)$", var.ollama_model_cache_s3_uri) : null
+  ollama_model_cache_bucket     = local.ollama_model_cache_s3_enabled ? local.ollama_model_cache_s3_parts[0] : null
+  ollama_model_cache_prefix_raw = local.ollama_model_cache_s3_enabled ? local.ollama_model_cache_s3_parts[1] : null
+  # Normalized to exactly one trailing slash (or "" for a bucket-root
+  # cache with no prefix) so the IAM policy's `s3:prefix` condition and
+  # object-ARN glob in eks.tf agree with each other and with what `aws
+  # s3 sync` actually writes under the configured prefix.
+  ollama_model_cache_prefix = local.ollama_model_cache_s3_enabled ? (
+    local.ollama_model_cache_prefix_raw == "" ? "" : "${trimsuffix(local.ollama_model_cache_prefix_raw, "/")}/"
+  ) : null
 }
 
 module "network" {
@@ -205,7 +228,14 @@ module "model_serving_ollama" {
   termination_grace_period_seconds = 30
   keda_enabled                     = var.ollama_keda_enabled
   keda_metrics_api_url             = var.ollama_run_registry_metrics_url
-  tags                             = var.tags
+  # Model-cache restore from S3 (see modules/model-serving-ollama/README.md
+  # "Restoring the model cache from S3") -- both null unless
+  # ollama_model_cache_s3_uri is actually set, in which case the IRSA role
+  # eks.tf declares specifically for this (scoped to exactly this
+  # bucket/prefix) is threaded in as service_account_role_arn.
+  model_cache_s3_uri       = local.ollama_model_cache_s3_enabled ? var.ollama_model_cache_s3_uri : null
+  service_account_role_arn = local.ollama_model_cache_s3_enabled ? aws_iam_role.ollama_model_cache[0].arn : null
+  tags                     = var.tags
 
   depends_on = [module.gpu_node_pool_ollama]
 }

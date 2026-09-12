@@ -44,3 +44,24 @@ resources:
 
 service:
   port: 11434
+
+# Model-cache restore from S3 -- both keys default to empty here so the
+# chart is independently helm-lintable/installable (see this file's own
+# header comment) with the exact same pull-only behavior it always had.
+# main.tf overrides both from var.service_account_role_arn /
+# var.model_cache_s3_uri. See README.md "Restoring the model cache from
+# S3" for the full behavior and templates/deployment.yaml +
+# templates/serviceaccount.yaml for the conditionals these gate.
+serviceAccount:
+  roleArn: ""
+
+modelCache:
+  s3Uri: ""
+  # Minimal official AWS CLI image via public ECR rather than Docker
+  # Hub's `amazon/aws-cli` -- avoids Docker Hub's pull-rate-limit, which
+  # matters specifically for this tier since frequent cold starts (i.e.
+  # frequent init-container image pulls) are the whole point of it.
+  # Pinned to an exact tag deliberately, never `latest`, so the restore
+  # step is reproducible; bump this tag deliberately, not automatically.
+  awsCliImage: "public.ecr.aws/aws-cli/aws-cli"
+  awsCliImageTag: "2.17.62"

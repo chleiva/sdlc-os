@@ -79,7 +79,23 @@ resource "helm_release" "ollama" {
       model = {
         name = var.model_name
       }
-      replicas = var.replicas
+      # When KEDA is enabled, the Deployment's *base* (Helm-managed)
+      # replica count must be 0, not var.replicas -- KEDA's ScaledObject
+      # below (minReplicaCount = 0) is what's supposed to scale 0->1 in
+      # response to real demand, but it only takes over scaling *after*
+      # Helm creates/updates the Deployment. Passing var.replicas (a
+      # default of 1) here unconditionally meant every `tofu apply`/
+      # `helm upgrade` immediately scheduled a pod -- and, since a
+      # scheduled pod is exactly what makes Karpenter launch a real spot
+      # GPU instance, immediately spun one up regardless of whether any
+      # real work had actually triggered it, with no scale-back-down path
+      # at all whenever keda_enabled = false (there is no ScaledObject in
+      # that case, so nothing would ever bring replicas back to 0). Real
+      # bug, found and fixed before Phase 2's first real apply -- var.
+      # replicas now only matters for the (non-default) case of running
+      # this tier without KEDA at all, where a static replica count is
+      # the only option.
+      replicas = var.keda_enabled ? 0 : var.replicas
       nodeSelector = merge(
         { "sdlc-auto.io/node-pool" = var.node_pool_name },
         var.instance_type != null ? { "node.kubernetes.io/instance-type" = var.instance_type } : {}
@@ -103,8 +119,30 @@ resource "helm_release" "ollama" {
           memory           = var.memory_request
         }
       }
+      # Model-cache restore from S3 -- both default to "" (chart-side
+      # truthiness check, see templates/serviceaccount.yaml and
+      # templates/deployment.yaml) so leaving both module variables unset
+      # renders neither the ServiceAccount nor the restore init container,
+      # i.e. exactly this chart's pre-existing pull-only behavior.
+      serviceAccount = {
+        roleArn = coalesce(var.service_account_role_arn, "")
+      }
+      modelCache = {
+        s3Uri = coalesce(var.model_cache_s3_uri, "")
+      }
     })
   ]
+
+  lifecycle {
+    precondition {
+      # The restore init container's `aws s3 sync` call has no real AWS
+      # credentials without an IRSA-annotated ServiceAccount -- catch this
+      # misconfiguration at plan/apply time rather than as a silent
+      # AccessDenied loop inside the init container at pod-start time.
+      condition     = var.model_cache_s3_uri == null || var.service_account_role_arn != null
+      error_message = "service_account_role_arn must be set when model_cache_s3_uri is set -- the model-cache-restore init container has no AWS credentials otherwise. See README.md \"Restoring the model cache from S3\"."
+    }
+  }
 }
 
 # --- KEDA ScaledObject: spot-only, scale-to-zero autoscaling ---------------

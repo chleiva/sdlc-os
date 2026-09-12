@@ -125,6 +125,29 @@ variable "ollama_run_registry_metrics_url" {
   default     = ""
 }
 
+variable "ollama_model_cache_s3_uri" {
+  type        = string
+  description = <<-EOT
+    Optional s3://bucket/prefix (e.g.
+    "s3://my-org-ollama-cache/ornith-1.5-35b-a3b/") to restore the Ollama
+    tier's on-disk model store from on pod start, via a real `aws s3
+    sync` init container, instead of a fresh ~23GB `ollama pull` from
+    Ollama's public registry on every cold start -- see
+    modules/model-serving-ollama/README.md "Restoring the model cache
+    from S3" for the full behavior, the one-time seeding step, and why
+    S3 (not an EBS-backed PVC) was chosen for this specific spot/
+    scale-to-zero tier. Null (the default): feature off -- this tier's
+    cold-start behavior is unchanged. Only takes effect when
+    `ollama_enabled = true`; when set, eks.tf declares a real
+    least-privilege IRSA role/policy scoped to exactly this
+    bucket/prefix and wires its ARN into
+    `module.model_serving_ollama.service_account_role_arn`. This
+    environment does NOT provision the S3 bucket itself -- see that same
+    README section for what a human still needs to do.
+  EOT
+  default     = null
+}
+
 variable "tags" {
   type        = map(string)
   description = "Common resource tags."

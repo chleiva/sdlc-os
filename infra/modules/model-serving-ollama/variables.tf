@@ -35,7 +35,7 @@ variable "image_tag" {
 
 variable "replicas" {
   type        = number
-  description = "Number of Ollama replicas. Single-cell, no GPU sharing per the platform's design -- 1 is the only sane value alongside the KEDA ScaledObject's maxReplicaCount below; not enforced here since `replicas` only sets the Helm chart's *base* value (KEDA overrides the live replica count once `keda_enabled = true`, per KEDA's own HPA-behind-the-scenes mechanics)."
+  description = "Static replica count used ONLY when keda_enabled = false (running this tier without autoscaling at all). When keda_enabled = true, main.tf ignores this and passes the chart a base replica count of 0 -- the KEDA ScaledObject below (minReplicaCount = 0) is solely responsible for scaling 0->1 in response to real demand and back to 0 when idle; a nonzero Helm-managed base value would otherwise schedule a pod (and therefore launch a real spot GPU instance via Karpenter) on every `tofu apply`/`helm upgrade`, regardless of whether any actual work had triggered it -- and with no way back to 0 at all if KEDA weren't there to take over. Single-cell, no GPU sharing per the platform's design -- 1 is the only sane value for the keda_enabled = false case, matching the ScaledObject's maxReplicaCount."
   default     = 1
 }
 
@@ -148,4 +148,44 @@ variable "tags" {
   type        = map(string)
   description = "Common resource labels applied to every resource this module creates."
   default     = {}
+}
+
+# --- Model-cache restore from S3 (replaces "pull from Ollama's public
+# registry on every cold start" with "restore from S3, pull only as a
+# fallback") -- see README.md "Restoring the model cache from S3" for
+# the full behavior, the one-time seeding step, and the S3-vs-EBS cost/
+# zonal-lock reasoning.
+
+variable "model_cache_s3_uri" {
+  type        = string
+  description = <<-EOT
+    Optional s3://bucket/prefix Ollama's model-cache-restore init
+    container syncs (`aws s3 sync`) into a shared `emptyDir` volume on
+    pod start, before the existing `postStart: ollama pull` step runs as
+    a safety-net fallback (kept unconditionally -- `ollama pull` is a
+    no-op once the model is already on disk, so this is never an
+    either/or). Null (the default): feature off -- no init container, no
+    ServiceAccount rendered, this tier's cold-start behavior is exactly
+    what it was before this variable existed (fresh `ollama pull` from
+    Ollama's public registry on every pod start). This module does not
+    create the S3 bucket -- see README's "what a human must still do".
+  EOT
+  default     = null
+}
+
+variable "service_account_role_arn" {
+  type        = string
+  description = <<-EOT
+    IRSA role ARN to annotate the Ollama pod's ServiceAccount with
+    (`eks.amazonaws.com/role-arn`), so the model-cache-restore init
+    container's `aws s3 sync` call has real AWS credentials scoped to
+    exactly the configured bucket/prefix -- same IRSA-annotation idiom as
+    modules/observability's `eso_service_account_role_arn` (see that
+    module's `kubernetes_service_account_v1.eso_grafana`). Null (the
+    default): no ServiceAccount is rendered at all and the Deployment
+    runs under the namespace's default ServiceAccount -- fine when
+    `model_cache_s3_uri` is also null, but required (enforced via a
+    `precondition` on `helm_release.ollama`, see main.tf) when it is set.
+  EOT
+  default     = null
 }

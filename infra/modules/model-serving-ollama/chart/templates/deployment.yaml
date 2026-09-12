@@ -20,6 +20,13 @@ spec:
       annotations:
         sdlc-auto.io/model-name: {{ .Values.model.name | quote }}
     spec:
+      # Only set when service_account_role_arn is configured (see
+      # ../serviceaccount.yaml) -- the model-cache-restore init container
+      # below is the only thing on this pod that currently needs real AWS
+      # credentials, via IRSA.
+      {{- if .Values.serviceAccount.roleArn }}
+      serviceAccountName: ollama-{{ .Values.environment }}
+      {{- end }}
       # No sized-against-a-signal preStop drain hook here, unlike
       # modules/model-serving/chart's vLLM deployment: this tier is the
       # spot-only, scale-to-zero KEDA/Karpenter-driven tier (see
@@ -41,9 +48,54 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.modelCache.s3Uri }}
+      volumes:
+        - name: ollama-models
+          emptyDir: {}
+      initContainers:
+        # Restores Ollama's on-disk model store into the emptyDir volume
+        # below from S3 before the main container starts, so a fresh pod
+        # does not have to `ollama pull` a fresh ~23GB model from
+        # Ollama's public registry on every cold start (see README
+        # "Restoring the model cache from S3"). `aws s3 sync` is
+        # incremental/idempotent and simply copies nothing if the
+        # prefix is empty (first-ever run, or a misconfigured bucket) --
+        # the postStart `ollama pull` below stays in place
+        # unconditionally as the real fallback for that case, this is
+        # not an either/or.
+        - name: restore-model-cache
+          image: "{{ .Values.modelCache.awsCliImage }}:{{ .Values.modelCache.awsCliImageTag }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Restoring Ollama model cache from {{ .Values.modelCache.s3Uri }} into /ollama-models ..."
+              aws s3 sync "{{ .Values.modelCache.s3Uri }}" /ollama-models --no-progress
+              echo "Restore step finished (an empty prefix here is expected on first-ever run -- the postStart ollama pull below is the real fallback for that case)."
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /ollama-models
+      {{- end }}
       containers:
         - name: ollama
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- if .Values.modelCache.s3Uri }}
+          env:
+            # Ollama's documented override for its default model-store
+            # path (normally ~/.ollama/models, i.e. /root/.ollama/models
+            # in this image): points it at the emptyDir volume the init
+            # container above restored from S3 instead. This directory
+            # holds Ollama's `blobs/`/`manifests/` layout directly, not
+            # a nested `.ollama/` dir -- that's how OLLAMA_MODELS is
+            # documented to work. Unset (chart default): Ollama stays on
+            # its built-in default path with no volume at all --
+            # unchanged pre-existing behavior.
+            - name: OLLAMA_MODELS
+              value: /ollama-models
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /ollama-models
+          {{- end }}
           ports:
             - containerPort: {{ .Values.service.port }}
               name: http
@@ -51,22 +103,31 @@ spec:
             postStart:
               exec:
                 # Pulls {{ .Values.model.name }} into the container's
-                # local model store on first pod start, per this
-                # deliverable's brief. THIS IS SLOW AND BANDWIDTH-HEAVY:
-                # ornith-1.5-35b-a3b is a ~23GB quantized model, and (see
-                # README "Known follow-up") this chart uses no
-                # persistent volume or custom baked image for the model
-                # store, so the full pull re-runs on every fresh pod --
-                # acceptable for a Phase-0/comparison pilot, not for
-                # production traffic that cares about cold-start latency.
-                # The Ollama server itself comes up and answers
-                # management endpoints (`/`, `/api/tags`) immediately;
-                # the FIRST real inference request against
-                # {{ .Values.model.name }} blocks until this pull
-                # finishes. postStart has no ordering guarantee against
-                # the main container process actually being ready to
-                # accept connections, so this polls the server's own
-                # port first rather than assuming it's already up.
+                # local model store (OLLAMA_MODELS, if set above) on
+                # every pod start, per this deliverable's brief. Kept
+                # unconditionally, including when `modelCache.s3Uri` is
+                # set: `ollama pull` checks what is already on disk and
+                # is a no-op once the model is already present, so this
+                # is a real, safe fallback for "the S3 restore above
+                # came up empty" (first-ever run, or a misconfigured
+                # bucket/prefix) -- not a slow redundant step in the
+                # common case, and not an either/or with the restore
+                # above.
+                # THIS IS SLOW AND BANDWIDTH-HEAVY THE FIRST TIME:
+                # ornith-1.5-35b-a3b is a ~23GB quantized model. Without
+                # `modelCache.s3Uri` set, this re-runs from scratch on
+                # every fresh pod (see README "Restoring the model cache
+                # from S3" for the mitigation, and "Known follow-up" for
+                # the two credible fixes not taken). The Ollama server
+                # itself comes up and answers management endpoints (`/`,
+                # `/api/tags`) immediately; the FIRST real inference
+                # request against {{ .Values.model.name }} blocks until
+                # this step finishes (whether that's a fast no-op
+                # because S3 already restored it, or a full pull).
+                # postStart has no ordering guarantee against the main
+                # container process actually being ready to accept
+                # connections, so this polls the server's own port first
+                # rather than assuming it's already up.
                 command:
                   - /bin/sh
                   - -c

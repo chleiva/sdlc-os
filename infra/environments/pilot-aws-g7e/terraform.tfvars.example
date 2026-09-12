@@ -35,3 +35,15 @@ mesh_enabled  = true
 # ollama_consolidate_after        = "60s"
 # ollama_keda_enabled             = false           # see README gap before enabling
 # ollama_run_registry_metrics_url = ""              # does not exist in services/run-registry today
+
+# Optional: restores the Ollama tier's on-disk model store from S3 on pod
+# start instead of a fresh ~23GB `ollama pull` from Ollama's public
+# registry on every cold start (falls back to that same pull only if the
+# restore comes up empty -- see modules/model-serving-ollama/README.md
+# "Restoring the model cache from S3"). Requires an S3 bucket that
+# already exists (this environment does NOT provision it) and a one-time
+# `ollama pull` + `aws s3 sync ~/.ollama/models s3://<bucket>/<prefix>/`
+# seeding step run somewhere with real internet access -- see that same
+# README section. Unset (the default): this tier's cold-start behavior
+# is unchanged.
+# ollama_model_cache_s3_uri = "s3://CHANGE-ME-ollama-model-cache/ornith-1.5-35b-a3b/"

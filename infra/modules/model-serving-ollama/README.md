@@ -37,34 +37,117 @@ already does the sibling-module-per-variant thing for
   nodeSelector parameterized (not hardcoded) around a single-GPU,
   48GB-class instance profile — default `g6e.xlarge` (NVIDIA L40S).
 
-## Known follow-up: model pulled fresh on every pod start
+## Restoring the model cache from S3 (`model_cache_s3_uri`)
 
-`ollama pull` runs from scratch every time a new pod starts — this chart
-declares no persistent volume for Ollama's model store (`/root/.ollama`)
-and no custom image with the model pre-baked in. For
-`ornith-1.5-35b-a3b` (a ~23GB quantized model) that means real,
-non-trivial time and bandwidth on every fresh pod, which is a direct cost
-to the KEDA scale-to-zero story this module also implements: scaling
-from 0 → 1 replica does not mean "ready to serve" until the pull
-finishes, potentially minutes after the pod starts, depending on
-available bandwidth. **This is flagged as a follow-up, not solved in
-this pass** — two credible real fixes, neither implemented here:
+Set `model_cache_s3_uri` (e.g. `s3://your-bucket/ornith-1.5-35b-a3b/`)
+and `service_account_role_arn` (an IRSA role ARN, see
+`environments/pilot-aws-g7e/eks.tf`'s `aws_iam_role.ollama_model_cache`
+for how the pilot environment provisions one) to replace the "pull from
+Ollama's public registry on every cold start" behavior below with:
 
-1. Bake the model into a custom image derived from `ollama/ollama`
-   (`ollama serve & ollama pull ornith-1.5-35b-a3b`, then commit),
-   trading a larger image pull (which container runtimes can layer-cache
-   across pods on the same node, unlike a fresh `ollama pull` into an
-   ephemeral filesystem) for zero per-pod model-download cost.
-2. A `PersistentVolumeClaim` mounted at `/root/.ollama`, pulled once and
-   reused across pod restarts on nodes that can reattach it — awkward
-   for the *scale-to-zero* case specifically, since Karpenter reclaiming
-   the underlying EC2 instance (the whole point of this tier) may not
-   preserve the same EBS volume attachment across a fresh node, so this
-   would need to be paired with a plan for what happens to the PVC.
+1. A real IRSA-annotated `ServiceAccount` is rendered
+   (`chart/templates/serviceaccount.yaml`) and used as the pod's
+   `serviceAccountName`.
+2. A new **init container** (a minimal AWS CLI image, pinned tag — see
+   `chart/values.yaml`'s `modelCache.awsCliImage`/`awsCliImageTag`) runs
+   `aws s3 sync <model_cache_s3_uri> /ollama-models` into a shared
+   `emptyDir` volume, before the main container starts.
+3. The main container's `OLLAMA_MODELS` env var is pointed at that same
+   `/ollama-models` path (Ollama's documented override for its default
+   model-store location — see "Ollama's model-store layout" below), so
+   if the sync actually restored the model, Ollama finds it already on
+   disk.
+4. The existing `postStart: ollama pull` hook (below) is kept
+   **unconditionally** as a real fallback — `ollama pull` is a no-op
+   once the model is already present, so this is always safe to run,
+   not an either/or with the restore step. This means a first-ever run
+   (empty bucket/prefix) or a misconfigured `model_cache_s3_uri` still
+   works, just slowly (the original pull-only behavior), rather than
+   failing outright.
 
-Either is a real, scoped follow-up; this pass intentionally ships the
-simple always-pull behavior with the cost documented rather than
-building either fix without a live cluster to validate it against.
+Both variables default to `null`/unset, in which case **none** of the
+above renders — no `ServiceAccount`, no init container, no
+`OLLAMA_MODELS` override, no `emptyDir` volume — and this tier's
+behavior is byte-for-byte the pull-only behavior this module has always
+had. This is deliberately additive/opt-in, not a replacement for the
+always-pull path, which stays fully intact.
+
+### Ollama's model-store layout
+
+Ollama's own documented storage layout: on Linux/macOS it defaults to
+`~/.ollama/models` (`/root/.ollama/models` in this image, since the
+official `ollama/ollama` image runs as root with `HOME=/root`);
+`OLLAMA_MODELS` overrides this directly to whatever directory you point
+it at, and that directory holds Ollama's `blobs/`/`manifests/` layout
+directly (not a nested `.ollama/` dir underneath it). This module points
+`OLLAMA_MODELS` at `/ollama-models`, the `emptyDir` mount, when
+`model_cache_s3_uri` is set — the restore init container's `aws s3 sync`
+target and Ollama's own read path agree on this exact directory.
+
+### What a human must still do
+
+This module does **not** provision the S3 bucket — same
+"consumes an already-existing input" pattern this repo already uses
+elsewhere (e.g. `services/tenant-cell`'s KMS-key disclaimer: the module
+consumes a key/bucket ARN, it does not create the underlying resource).
+Before setting `model_cache_s3_uri`, a human still needs to:
+
+1. **Create the S3 bucket** (any region; nothing here provisions it).
+   Standard `s3:PutBucketEncryption`/versioning/lifecycle hygiene is the
+   bucket owner's call, not this module's.
+2. **Seed the cache once**, from anywhere with real internet access
+   (not required to be inside this cluster/VPC):
+   ```sh
+   ollama pull ornith-1.5-35b-a3b
+   aws s3 sync ~/.ollama/models s3://<bucket>/<prefix>/
+   ```
+   (adjust the local source path if `OLLAMA_MODELS` was already
+   overridden wherever this pull is run). This is a one-time step per
+   model version — re-run it only when the pinned model changes.
+3. **Grant/verify the IRSA role** (`service_account_role_arn`) can reach
+   that bucket — the pilot environment's `aws_iam_role.ollama_model_cache`
+   (see `environments/pilot-aws-g7e/eks.tf`) already scopes a real
+   least-privilege `s3:GetObject`/`s3:ListBucket` policy to exactly the
+   configured bucket/prefix ARN, nothing else; a hand-rolled deployment
+   of this module elsewhere needs the equivalent.
+
+### Why S3, not an EBS-backed PersistentVolumeClaim
+
+The two follow-ups originally flagged here were "bake the model into a
+custom image" and "a PVC mounted at the model-store path." A PVC is the
+more obvious fix, but this tier's whole design point is spot-only,
+scale-to-zero (see the `ScaledObject` below): Karpenter reclaiming the
+underlying EC2 instance when KEDA scales to 0, then provisioning a fresh
+one in whichever AZ has capacity when it scales back to 1, is the normal
+steady-state path here, not an edge case. An EBS volume is
+**zone-locked** — a PVC bound to an EBS volume in `us-east-1a` cannot
+attach to a fresh node Karpenter happens to place in `us-east-1b`, which
+is exactly this tier's normal failure mode, not a rare one. S3 has no
+such constraint: any node in any AZ in the bucket's region can restore
+from it. Cost-wise this is also cheaper for this workload: ~23GB at S3
+Standard pricing is roughly **$0.50/month**, versus an equivalent
+~23GB `gp3` EBS volume at roughly **$2–3/month** — and the EBS number
+doesn't even account for the zonal-lock problem above, which S3 simply
+doesn't have. The "bake into a custom image" option remains a valid
+alternative not taken here (it trades a larger, layer-cacheable image
+pull for zero runtime S3 dependency) — not implemented in this pass
+either, and still a legitimate follow-up if image-build tooling for a
+custom `ollama/ollama` derivative is ever set up.
+
+## Known follow-up: model still pulled fresh on every pod start when `model_cache_s3_uri` is unset
+
+`model_cache_s3_uri` is opt-in (default `null`). Without it set, `ollama
+pull` still runs from scratch every time a new pod starts — this chart
+declares no persistent volume for Ollama's model store and no custom
+image with the model pre-baked in. For `ornith-1.5-35b-a3b` (a ~23GB
+quantized model) that means real, non-trivial time and bandwidth on
+every fresh pod, which is a direct cost to the KEDA scale-to-zero story
+this module also implements: scaling from 0 → 1 replica does not mean
+"ready to serve" until the pull finishes, potentially minutes after the
+pod starts, depending on available bandwidth. Setting
+`model_cache_s3_uri` (see "Restoring the model cache from S3" above) is
+the real fix for this now; it remains unsolved-by-default because the
+feature is opt-in, not because it isn't real.
 
 ## Model context-length vs. VRAM caveat
 
@@ -139,15 +222,28 @@ since there is no real endpoint yet to authenticate against.
   (see that module's README "Spot-only, scale-to-zero pools") must exist
   and its `node_pool_name` output must be passed to `var.node_pool_name`
   here — this module does not provision compute itself.
+- **The S3 bucket in `model_cache_s3_uri`**, if that variable is set —
+  see "What a human must still do" above. Also requires an IRSA
+  role/`ServiceAccount` webhook (the EKS Pod Identity Webhook that
+  actually injects `AWS_ROLE_ARN`/`AWS_WEB_IDENTITY_TOKEN_FILE` into a
+  pod annotated with `eks.amazonaws.com/role-arn`) to already be part of
+  the cluster's control plane — true for any real EKS cluster with IRSA
+  enabled, not something this module or `environments/pilot-aws-g7e`
+  installs.
 
 ## Real vs. mocked / not-yet-validated
 
 - Real: the Helm chart, its Deployment/Service, the `postStart` pull
-  hook's shape, the `ScaledObject` HCL.
+  hook's shape, the `ScaledObject` HCL, the model-cache-restore init
+  container + IRSA `ServiceAccount` (when `model_cache_s3_uri`/
+  `service_account_role_arn` are set).
 - Not validated against a live cluster or a real GPU in this build
   environment (no AWS credentials, no live cluster, no live GPU
   available) — see `infra/README.md`'s top-level caveat. `tofu plan`
   against the `kubernetes_manifest` `ScaledObject` resource specifically
   requires a reachable Kubernetes API serving KEDA's actual CRD schema;
   expect a connection error there, not a structural one, when run
-  without a live, KEDA-equipped cluster.
+  without a live, KEDA-equipped cluster. The `aws s3 sync` init
+  container and the IRSA role's actual S3 access are likewise not
+  validated against a real bucket/cluster here — no real AWS credentials
+  exist in this build environment (see repo-wide convention).

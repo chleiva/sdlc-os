@@ -34,3 +34,8 @@ output "ollama_service_endpoint" {
   value       = var.ollama_enabled ? module.model_serving_ollama[0].service_endpoint : null
   description = "In-cluster DNS name of the Ollama service, or null when ollama_enabled = false. OpenAI-compatible routes live under /v1/ on this endpoint."
 }
+
+output "ollama_model_cache_role_arn" {
+  value       = local.ollama_model_cache_s3_enabled ? aws_iam_role.ollama_model_cache[0].arn : null
+  description = "IRSA role ARN for the Ollama tier's model-cache-restore init container, or null when ollama_model_cache_s3_uri is unset. See modules/model-serving-ollama/README.md \"Restoring the model cache from S3\"."
+}

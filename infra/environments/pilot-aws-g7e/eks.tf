@@ -423,6 +423,86 @@ resource "aws_iam_role_policy_attachment" "external_secrets_grafana" {
   policy_arn = module.secrets.access_policy_arn
 }
 
+# --- Ollama model-cache restore: IRSA role + least-privilege S3 read
+# policy (closes the "pull ~23GB from Ollama's public registry on every
+# cold start" gap flagged in modules/model-serving-ollama/README.md's
+# former "Known follow-up" section). Only declared when the environment
+# actually turns this on (local.ollama_model_cache_s3_enabled, set in
+# main.tf from var.ollama_enabled + var.ollama_model_cache_s3_uri).
+#
+# Same IRSA trust-policy shape as aws_iam_role.external_secrets_grafana
+# above -- Service = ec2.amazonaws.com placeholder, narrowed to this
+# cluster's OIDC provider + the Ollama ServiceAccount's namespace/name
+# (namespace: module.model_serving_ollama's `namespace` output, default
+# "model-serving-ollama"; ServiceAccount name: "ollama-${var.environment}",
+# see chart/templates/serviceaccount.yaml) in a real apply, same caveat
+# as that role: this repo has no `aws_iam_openid_connect_provider`
+# resource anywhere yet (the EKS cluster's own OIDC issuer is not
+# currently registered as an IAM identity provider), so a real federated
+# trust policy is not fabricated here either -- reusing the existing
+# pattern rather than inventing a different, equally-incomplete one.
+resource "aws_iam_role" "ollama_model_cache" {
+  count = local.ollama_model_cache_s3_enabled ? 1 : 0
+
+  name = "${var.environment}-ollama-model-cache"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" } # IRSA trust policy narrowed via the cluster's OIDC provider in a real apply, scoped to the "ollama-${var.environment}" ServiceAccount in the Ollama tier's namespace -- same caveat as aws_iam_role.external_secrets_grafana above
+    }]
+  })
+  tags = var.tags
+}
+
+# Least-privilege: s3:GetObject/s3:ListBucket scoped to exactly the
+# configured bucket/prefix (local.ollama_model_cache_bucket/_prefix, from
+# main.tf's parsing of var.ollama_model_cache_s3_uri) -- nothing else,
+# no wildcard bucket access.
+data "aws_iam_policy_document" "ollama_model_cache" {
+  count = local.ollama_model_cache_s3_enabled ? 1 : 0
+
+  # s3:ListBucket is a bucket-level action (its resource is the bucket
+  # ARN, not an object ARN) -- narrowed to the configured prefix via a
+  # request condition so this role cannot enumerate the bucket's other
+  # keys/prefixes, only discover what exists under its own.
+  statement {
+    sid       = "AllowListConfiguredPrefixOnly"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${local.ollama_model_cache_bucket}"]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${local.ollama_model_cache_prefix}*"]
+    }
+  }
+
+  statement {
+    sid       = "AllowReadConfiguredPrefixObjects"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["arn:aws:s3:::${local.ollama_model_cache_bucket}/${local.ollama_model_cache_prefix}*"]
+  }
+}
+
+resource "aws_iam_policy" "ollama_model_cache" {
+  count = local.ollama_model_cache_s3_enabled ? 1 : 0
+
+  name        = "${var.environment}-ollama-model-cache"
+  description = "Least-privilege s3:GetObject/s3:ListBucket read access to the configured Ollama model-cache bucket/prefix (var.ollama_model_cache_s3_uri) -- nothing else."
+  policy      = data.aws_iam_policy_document.ollama_model_cache[0].json
+  tags        = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "ollama_model_cache" {
+  count = local.ollama_model_cache_s3_enabled ? 1 : 0
+
+  role       = aws_iam_role.ollama_model_cache[0].name
+  policy_arn = aws_iam_policy.ollama_model_cache[0].arn
+}
+
 resource "helm_release" "karpenter" {
   name       = "karpenter"
   repository = "oci://public.ecr.aws/karpenter"
