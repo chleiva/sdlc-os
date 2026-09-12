@@ -11,6 +11,7 @@ Public surface is intentionally small; see `orchestrator.core.Orchestrator`
 for the state machine entry point.
 """
 
+from orchestrator.backend_factory import create_agent_backend
 from orchestrator.core import Orchestrator, RunStatus
 
-__all__ = ["Orchestrator", "RunStatus"]
+__all__ = ["Orchestrator", "RunStatus", "create_agent_backend"]

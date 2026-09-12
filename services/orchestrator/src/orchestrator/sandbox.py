@@ -67,6 +67,14 @@ class SandboxTier(str, Enum):
     MICROVM = "microvm"  # default per Section 10.1
     GVISOR = "gvisor"  # fallback floor where a microVM is impractical
     CONTAINER = "container"  # trusted, previously human-reviewed automation only
+    # (New, Rev 9) Section 10.3's ephemeral-container tier for the Docker
+    # Compose deployment mode (Section 14.16) -- see docker_sandbox.py.
+    # Same string value as that module's own DockerSandboxTier.EPHEMERAL_
+    # CONTAINER (added there before this integration step could touch this
+    # file) so an existing AuditRecord.tier comparison against either enum
+    # keeps working unchanged; this member is what makes the tier
+    # selectable through default_runtime_for_tier below.
+    DOCKER_CONTAINER = "docker_ephemeral_container"
 
 
 def required_tier(*, code_just_written: bool, previously_human_reviewed: bool) -> SandboxTier:
@@ -232,6 +240,16 @@ class GVisorSandboxRuntime(SandboxRuntime):
 
 
 def default_runtime_for_tier(tier: SandboxTier) -> SandboxRuntime:
+    if tier == SandboxTier.DOCKER_CONTAINER:
+        # Local import: docker_sandbox.py imports SandboxRuntime/AuditRecord/
+        # etc. from this module, so importing it back at module level here
+        # would be circular. Selected only for the Docker Compose deployment
+        # mode (Section 14.16) -- never the default, and never reachable in
+        # the multi-tenant cloud architecture's own tier selection (Section
+        # 10.1/10.3: this tier is explicitly scoped to single-tenant use).
+        from orchestrator.docker_sandbox import DockerContainerSandboxRuntime
+
+        return DockerContainerSandboxRuntime()
     return {
         SandboxTier.MICROVM: MicroVMSandboxRuntime,
         SandboxTier.GVISOR: GVisorSandboxRuntime,

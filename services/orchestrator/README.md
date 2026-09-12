@@ -23,6 +23,23 @@ services/orchestrator/
                          `ornith-1.5-35b-a3b`, validated against a local
                          mock Ollama HTTP server (see "OllamaAgentBackend"
                          below)
+    anthropic_backend.py   (New, Rev 9) AnthropicAgentBackend: real client
+                         for Anthropic's Messages API (Section 13.8)
+    openai_backend.py      (New, Rev 9) OpenAIAgentBackend: real client
+                         for OpenAI's Chat Completions API (Section 13.8)
+    bedrock_backend.py     (New, Rev 9) BedrockAgentBackend: real client
+                         for Amazon Bedrock's Converse API, hosting
+                         MiniMax M2.5 among other models (Section 13.8)
+    backend_factory.py      (New, Rev 9) create_agent_backend(vendor, ...):
+                         the config-driven seam that selects among all
+                         five AgentBackend implementations above (see
+                         "Selecting an inference vendor" below)
+    docker_sandbox.py       (New, Rev 9) DockerContainerSandboxRuntime:
+                         Section 10.3's ephemeral-per-task-container
+                         sandbox tier for the Docker Compose deployment
+                         mode (Section 14.16) -- a real fourth
+                         SandboxTier, not a placeholder (see "Sandbox
+                         tiering" below)
     verification.py      VerificationRunner interface (D7 integration
                          seam) + ScriptedVerificationRunner (mock)
     checkpoints.py        Section 9.4 default budgets + Section 9.3
@@ -44,13 +61,27 @@ services/orchestrator/
     sandbox.py                   Section 10.1 sandbox tiering: real
                          subprocess resource limits + egress allowlist
                          proxy, tier-selection policy, microVM/gVisor
-                         structural placeholders
+                         structural placeholders, and (New, Rev 9)
+                         SandboxTier.DOCKER_CONTAINER dispatching to
+                         docker_sandbox.py's real implementation
   tests/                          one pytest module per concern; see the
                          final agent report for the acceptance-criteria
                          -> test-file mapping
     mock_ollama_server.py         local stdlib HTTP server mimicking
                          Ollama's native /api/chat response shape, for
                          test_ollama_backend.py
+    mock_anthropic_server.py      (New, Rev 9) same idiom, for
+                         test_anthropic_backend.py
+    mock_openai_server.py         (New, Rev 9) same idiom, for
+                         test_openai_backend.py
+    fake_bedrock_client.py        (New, Rev 9) hand-built fake
+                         bedrock-runtime client (moto 5.2.3, the version
+                         already in use elsewhere in this repo, does not
+                         implement Bedrock's Converse API), for
+                         test_bedrock_backend.py
+    test_docker_sandbox.py        (New, Rev 9) real tests against a real
+                         local Docker daemon (skipped, not disabled,
+                         where none is reachable)
 ```
 
 ## Setup
@@ -81,12 +112,95 @@ no-op on Darwin); it runs for real on Linux.
 
 ## What's mocked vs. real
 
-There is no live LLM API endpoint in this environment (D6 doesn't exist
-as a running service here) and no real Firecracker/gVisor runtime
-available. See `model_backend.py`'s and `sandbox.py`'s module docstrings
-for exactly what is genuinely enforced/real in this pass versus a
-structural placeholder for D6/infra to back later -- and the final agent
-report for the short version.
+There is no live LLM API endpoint, and no live Anthropic/OpenAI/Bedrock
+account, in this environment, and no real Firecracker/gVisor runtime
+available for the multi-tenant cloud deployment's own sandbox tiers. See
+`model_backend.py`'s and `sandbox.py`'s module docstrings for exactly
+what is genuinely enforced/real in this pass versus a structural
+placeholder for D6/infra to back later -- and the final agent report for
+the short version. **One exception, new in Rev 9**: the Docker Compose
+deployment mode's own sandbox tier (`docker_sandbox.py`,
+`SandboxTier.DOCKER_CONTAINER`) is genuinely real, not a placeholder --
+it runs a real container against a real local Docker daemon, not a
+subprocess standing in for one. See "Sandbox tiering" below.
+
+## Selecting an inference vendor (New, Rev 9)
+
+Master spec Section 13.8 ("Multi-Vendor API-Key Inference"): the Docker
+Compose deployment mode (Section 14.16) has no self-hosted GPU to serve
+the pinned reference model from, so it delegates inference to an
+external, API-key-authenticated vendor instead -- selected per
+deployment, never hardcoded at a call site in `core.py`. Five
+`AgentBackend` implementations exist side by side, all built independently
+against the same interface and reconciled here:
+
+```python
+from orchestrator import create_agent_backend
+
+# Anthropic
+backend = create_agent_backend("anthropic", api_key="sk-ant-...")
+
+# OpenAI
+backend = create_agent_backend("openai", api_key="sk-...")
+
+# Amazon Bedrock (hosting, among other models, MiniMax M2.5) -- model_id
+# has no default; see bedrock_backend.py's module docstring for why.
+backend = create_agent_backend("bedrock", model_id="<your account's model id>", region_name="us-east-1")
+
+# Self-hosted Ollama (the multi-tenant cloud architecture's own option)
+backend = create_agent_backend("ollama", base_url="http://ollama:11434")
+
+# The deterministic test mock -- what every existing test in this
+# package still uses
+backend = create_agent_backend("scripted", plans=[...], diffs=[...])
+```
+
+Every kwarg is that vendor's own `*BackendConfig` dataclass field name
+verbatim (`backend_factory.py`'s docstring explains why: no
+renaming/translation layer, so a deployment's config file is a near-
+literal transcription of whichever vendor's own config fields it's
+filling in) -- see each vendor module's own docstring (`anthropic_backend.py`,
+`openai_backend.py`, `bedrock_backend.py`, `ollama_backend.py`) for its
+exact fields and defaults. `create_agent_backend("bad-vendor", ...)`
+raises `ValueError` naming every supported vendor;
+`create_agent_backend("bedrock", ...)` without `model_id` raises a
+`ValueError` explaining exactly why that one field has no default,
+rather than a confusing `TypeError` from inside the dataclass
+constructor.
+
+**Credential handling, all four vendors**: every API key/credential is a
+plain constructor argument, never read from an environment variable
+inside any backend class, and never interpolated into any exception
+message, log line, or `repr()` that class raises/produces -- proven by a
+dedicated test in each vendor's own test file (see each module's
+docstring for specifics). `create_agent_backend` itself never logs or
+persists the kwargs it's given either.
+
+## Sandbox tiering (Section 10.1, and Section 10.3 New Rev 9)
+
+`sandbox.py`'s `SandboxTier` enum now has four members:
+`MICROVM`/`GVISOR`/`CONTAINER` (Section 10.1, the multi-tenant cloud
+architecture's tiers -- `MICROVM`/`GVISOR` are structural placeholders
+there, see above) and `DOCKER_CONTAINER` (Section 10.3, New Rev 9 --
+`default_runtime_for_tier(SandboxTier.DOCKER_CONTAINER)` returns a real
+`docker_sandbox.DockerContainerSandboxRuntime`, genuinely isolating each
+unit of agent-generated code in its own short-lived, single-use Docker
+container rather than delegating to the plain-subprocess mechanics the
+other three tiers share). This tier is explicitly scoped to the
+single-tenant Docker Compose deployment mode (Section 14.16) -- it must
+never be selected in the multi-tenant cloud architecture, since a
+container's isolation floor (a shared host kernel) is weaker than
+Section 10.1's microVM tier is meant to guarantee there (see master
+spec's Risk Register, "Container-sandbox isolation floor lower than the
+fleet's microVM tier"). See `docker_sandbox.py`'s own module docstring
+for exactly how resource limits (Docker's own `--ulimit`/`--memory`/
+`--cpus`/`--pids-limit`, plus this module's own wall-clock enforcement)
+and egress control (the existing `AllowlistProxy`, reached across the
+container boundary via `host.docker.internal`, or `--network none` when
+no allowlist is configured at all) are real, working mechanisms, not
+placeholders -- and `tests/test_docker_sandbox.py` for the tests that
+prove it against a real local Docker daemon (skipped, not silently
+disabled, wherever none is reachable).
 
 ## `OllamaAgentBackend`
 
