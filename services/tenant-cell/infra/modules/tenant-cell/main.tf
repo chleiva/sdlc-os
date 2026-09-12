@@ -44,7 +44,7 @@ locals {
   # kept in lockstep by hand; `tests/test_naming.py` pins the exact HCL
   # expressions below so a drift is caught as a test failure, not silently.
   tenant_slug_sanitized = trim(replace(lower(var.tenant_id), "/[^a-z0-9]+/", "-"), "-")
-  tenant_slug            = "${local.tenant_slug_sanitized != "" ? local.tenant_slug_sanitized : "tenant"}-${substr(sha256(var.tenant_id), 0, 8)}"
+  tenant_slug           = "${local.tenant_slug_sanitized != "" ? local.tenant_slug_sanitized : "tenant"}-${substr(sha256(var.tenant_id), 0, 8)}"
 
   # The per-tenant environment name every resource this module creates
   # (directly or via the modules it calls) derives from. Matches
@@ -88,7 +88,7 @@ locals {
 
   node_pool_labels = {
     "sdlc-auto.io/node-pool" = local.computed_node_pool_name
-    "sdlc-auto.io/tenant-id" = var.tenant_id
+    "sdlc-auto.io/tenant-id" = local.tenant_slug
   }
 
   # model-serving's `tags` variable is applied directly as a Kubernetes
@@ -115,7 +115,7 @@ locals {
   model_serving_labels = merge(
     { for k, v in var.tags : replace(k, ":", ".") => v },
     {
-      "sdlc-auto.io/tenant-id" = var.tenant_id
+      "sdlc-auto.io/tenant-id" = local.tenant_slug
       "sdlc-auto.io/module"    = "tenant-cell"
     }
   )
@@ -137,7 +137,7 @@ module "gpu_node_pool" {
   max_size                   = var.max_size
   desired_size               = var.desired_size
   labels                     = local.node_pool_labels
-  tenant_id                  = var.tenant_id
+  tenant_id                  = local.tenant_slug
   tags                       = local.tags
 }
 
@@ -145,7 +145,7 @@ module "model_serving_primary" {
   source = "../../../../../infra/modules/model-serving"
 
   environment                      = local.tenant_environment
-  namespace                        = "model-serving-${var.tenant_id}"
+  namespace                        = "model-serving-${local.tenant_slug}"
   model_artifact_uri               = var.primary_model_artifact_uri
   model_weight_checksum            = var.primary_model_weight_checksum
   tensor_parallel_size             = var.primary_tensor_parallel_size
@@ -153,7 +153,7 @@ module "model_serving_primary" {
   replicas                         = var.replicas
   node_pool_name                   = module.gpu_node_pool.node_pool_name
   termination_grace_period_seconds = var.warning_window_seconds - var.termination_grace_buffer_seconds
-  tenant_id                        = var.tenant_id
+  tenant_id                        = local.tenant_slug
   tags                             = local.model_serving_labels
 }
 
@@ -170,7 +170,7 @@ module "model_serving_reviewer" {
   source = "../../../../../infra/modules/model-serving"
 
   environment                      = "${local.tenant_environment}-reviewer"
-  namespace                        = "model-serving-${var.tenant_id}"
+  namespace                        = "model-serving-${local.tenant_slug}"
   model_artifact_uri               = var.reviewer_model_artifact_uri
   model_weight_checksum            = var.reviewer_model_weight_checksum
   tensor_parallel_size             = var.reviewer_tensor_parallel_size
@@ -178,6 +178,6 @@ module "model_serving_reviewer" {
   replicas                         = var.replicas
   node_pool_name                   = module.gpu_node_pool.node_pool_name
   termination_grace_period_seconds = var.warning_window_seconds - var.termination_grace_buffer_seconds
-  tenant_id                        = var.tenant_id
+  tenant_id                        = local.tenant_slug
   tags                             = local.model_serving_labels
 }

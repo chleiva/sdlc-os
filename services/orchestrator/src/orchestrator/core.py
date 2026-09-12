@@ -31,9 +31,9 @@ from uuid import uuid4
 from run_registry import RegistryService, Run
 from run_registry import stages as rr_stages
 
-from orchestrator.checkpoints import Budget, DEFAULT_BUDGETS, DiffStats, evaluate_checkpoints, resolve_budget
-from orchestrator.model_backend import AgentBackend, DiffOutput, PlanOutput
-from orchestrator.plan_artifact import PlanArtifactStore, diff_touches_out_of_scope, generate_plan_artifact
+from orchestrator.checkpoints import DEFAULT_BUDGETS, DiffStats, evaluate_checkpoints, resolve_budget
+from orchestrator.model_backend import AgentBackend, PlanOutput
+from orchestrator.plan_artifact import PlanArtifactStore, generate_plan_artifact
 from orchestrator.progress import RunProgress, RunProgressStore
 from orchestrator.skills import ToolInvoker
 from orchestrator.verification import VerificationRunner

@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tenant_cell.model_diversity import DiversityCheckResult, TenantCellModelConfig, validate_model_diversity
+from tenant_cell.model_diversity import (
+    DiversityCheckResult,
+    TenantCellModelConfig,
+    validate_model_diversity,
+)
 
 
 @dataclass(frozen=True)

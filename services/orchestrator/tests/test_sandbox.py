@@ -7,6 +7,8 @@ from __future__ import annotations
 import socket
 import sys
 
+import pytest
+
 from orchestrator.sandbox import (
     AllowlistProxy,
     ResourceLimits,
@@ -43,6 +45,16 @@ def test_real_cpu_time_limit_actually_kills_a_cpu_bound_loop():
     assert not result.timed_out
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "RLIMIT_AS is a documented no-op on macOS's Mach-VM kernel (setrlimit "
+        "rejects it outright regardless of value) -- see sandbox.py's "
+        "_limit_resources docstring. This exact test passes on Linux, where "
+        "RLIMIT_AS is honored; it is skipped here rather than asserting a "
+        "platform capability this environment cannot provide."
+    ),
+)
 def test_real_memory_limit_actually_refuses_a_large_allocation():
     runtime = SubprocessSandboxRuntime()
     script = "data = bytearray(2 * 1024 * 1024 * 1024)\n"  # 2GB, over the limit below

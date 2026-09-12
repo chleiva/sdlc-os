@@ -15,7 +15,12 @@ Public surface. See each module's own docstring for what it covers:
 
 from tenant_cell.clock import Clock, FakeClock, RealClock
 from tenant_cell.cold_start import ColdStartResult, track_cold_start
-from tenant_cell.interruption_watcher import InterruptionResult, InterruptionWatcher, Step, StepTiming
+from tenant_cell.interruption_watcher import (
+    InterruptionResult,
+    InterruptionWatcher,
+    Step,
+    StepTiming,
+)
 from tenant_cell.model_diversity import (
     DiversityCheckResult,
     FrontierEscalationConfig,
@@ -30,38 +35,48 @@ from tenant_cell.model_version_governance import (
     PromotionResult,
     promote_model_version,
 )
-from tenant_cell.naming import model_serving_namespace, node_pool_name, tenant_environment, tenant_slug
-from tenant_cell.provisioning_client import DrainResult, FakeProvisioningClient, NodeHandle, ProvisioningClient
+from tenant_cell.naming import (
+    model_serving_namespace,
+    node_pool_name,
+    tenant_environment,
+    tenant_slug,
+)
+from tenant_cell.provisioning_client import (
+    DrainResult,
+    FakeProvisioningClient,
+    NodeHandle,
+    ProvisioningClient,
+)
 from tenant_cell.tenant_cell import TenantCellReadiness, mark_tenant_cell_ready
 
 __all__ = [
     "Clock",
-    "FakeClock",
-    "RealClock",
     "ColdStartResult",
-    "track_cold_start",
+    "DiversityCheckResult",
+    "DrainResult",
+    "EvaluationSuiteResult",
+    "FakeClock",
+    "FakeProvisioningClient",
+    "FrontierEscalationConfig",
     "InterruptionResult",
     "InterruptionWatcher",
-    "Step",
-    "StepTiming",
-    "DiversityCheckResult",
-    "FrontierEscalationConfig",
-    "ModelSpec",
-    "TenantCellModelConfig",
-    "validate_model_diversity",
-    "EvaluationSuiteResult",
     "ModelArtifact",
+    "ModelSpec",
+    "NodeHandle",
     "PromotionDenialReason",
     "PromotionResult",
-    "promote_model_version",
-    "model_serving_namespace",
-    "node_pool_name",
-    "tenant_environment",
-    "tenant_slug",
-    "DrainResult",
-    "FakeProvisioningClient",
-    "NodeHandle",
     "ProvisioningClient",
+    "RealClock",
+    "Step",
+    "StepTiming",
+    "TenantCellModelConfig",
     "TenantCellReadiness",
     "mark_tenant_cell_ready",
+    "model_serving_namespace",
+    "node_pool_name",
+    "promote_model_version",
+    "tenant_environment",
+    "tenant_slug",
+    "track_cold_start",
+    "validate_model_diversity",
 ]

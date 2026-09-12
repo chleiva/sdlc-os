@@ -34,7 +34,7 @@ external boundary" discipline every other deliverable in this system
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

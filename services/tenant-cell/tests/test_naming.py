@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tenant_cell.naming import model_serving_namespace, node_pool_name, tenant_environment, tenant_slug
+from tenant_cell.naming import (
+    model_serving_namespace,
+    node_pool_name,
+    tenant_environment,
+    tenant_slug,
+)
 
 _TENANT_CELL_MAIN_TF = (
     Path(__file__).resolve().parents[1] / "infra" / "modules" / "tenant-cell" / "main.tf"
@@ -50,5 +55,6 @@ def test_python_naming_formula_stays_in_lockstep_with_the_hcl():
     without updating the other, this fails instead of silently drifting.
     """
     hcl = _TENANT_CELL_MAIN_TF.read_text()
-    assert 'tenant_environment = "${var.base_environment}-tenant-${var.tenant_id}"' in hcl
+    assert 'tenant_slug_sanitized = trim(replace(lower(var.tenant_id), "/[^a-z0-9]+/", "-"), "-")' in hcl
+    assert 'tenant_environment = "${var.base_environment}-tenant-${local.tenant_slug}"' in hcl
     assert 'computed_node_pool_name = "${local.tenant_environment}-gpu-node-pool"' in hcl

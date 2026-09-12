@@ -18,10 +18,20 @@ terraform {
   }
 }
 
+locals {
+  # Kubernetes label keys allow at most one '/' (prefix delimiter) and no
+  # ':' at all, but var.tags carries cloud-resource-tag-style keys like
+  # "sdlc-auto:managed-by" (valid as e.g. an AWS tag, invalid as a k8s
+  # label — surfaced by D6/services/tenant-cell's real `tofu plan` run
+  # against this module, see infra/README.md). Sanitize ':' -> '.' before
+  # use as labels; values and the tags' own use elsewhere are unaffected.
+  k8s_safe_tags = { for k, v in var.tags : replace(k, ":", ".") => v }
+}
+
 resource "kubernetes_namespace_v1" "this" {
   metadata {
     name   = var.namespace
-    labels = merge(var.tags, { "sdlc-auto.io/component" = "model-serving" })
+    labels = merge(local.k8s_safe_tags, { "sdlc-auto.io/component" = "model-serving" })
   }
 }
 

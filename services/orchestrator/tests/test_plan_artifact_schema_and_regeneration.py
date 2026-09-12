@@ -3,8 +3,6 @@ from a `PlanOutput`, and "regenerated, not hand-edited" as an actually
 enforced property (there is no update/patch function to call instead)."""
 from __future__ import annotations
 
-import json
-
 import pytest
 from jsonschema import Draft202012Validator
 
@@ -14,6 +12,7 @@ from orchestrator.plan_artifact import (
     PlanArtifactStore,
     PlanArtifactValidationError,
     SCHEMA,
+    diff_touches_out_of_scope,
     generate_plan_artifact,
     hash_human_plan,
 )
@@ -85,6 +84,13 @@ def test_regeneration_is_a_new_artifact_not_a_patch(tmp_path):
     # to call generate_plan_artifact again with a new PlanOutput.
     assert not hasattr(store, "update")
     assert not hasattr(store, "patch")
+
+
+def test_diff_touches_out_of_scope_is_a_pure_set_difference_against_the_artifact():
+    plan = make_plan_output(scope_in=("src/foo.py", "src/bar.py"))
+    artifact = generate_plan_artifact(run_id="run-6", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="t")
+    assert diff_touches_out_of_scope(artifact, ["src/foo.py", "src/bar.py"]) == []
+    assert diff_touches_out_of_scope(artifact, ["src/foo.py", "src/unknown.py"]) == ["src/unknown.py"]
 
 
 def test_an_invalid_hand_built_artifact_fails_schema_validation():

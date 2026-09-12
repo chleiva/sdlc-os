@@ -139,6 +139,35 @@ def list_registered_worktrees(repo_path: Path) -> list[str]:
     return [line[len("worktree "):].strip() for line in result.stdout.splitlines() if line.startswith("worktree ")]
 
 
+def assign_worktrees_for_parallel_group(
+    *, artifact: dict, group_name: str, repo_path: Path, base_ref: str, worktrees_root: Path
+) -> dict[str, WorktreeHandle]:
+    """Section 8.1 wiring between the plan artifact's sub-task graph
+    (Section 9.5) and real worktree isolation: for every subtask sharing
+    `group_name` as its `parallel_group`, create (or reuse) that
+    subtask's own dedicated worktree, keyed by `<run_id>-<task_id>` as
+    the session_id -- so a genuinely concurrent multi-agent scheduler has
+    a one-to-one, collision-free worktree per parallel agent to hand off
+    to. (A full concurrent scheduler that actually runs those agents at
+    the same time is out of this deliverable's scope -- see the D2
+    report; this function proves the isolation mechanics the plan
+    artifact's parallel markers are meant to drive.)
+    """
+    subtasks = [
+        st for st in artifact["subtask_graph"]["subtasks"] if st["parallel_group"] == group_name
+    ]
+    if len(subtasks) < 2:
+        raise WorktreeError(f"parallel_group {group_name!r} does not have 2+ subtasks in this artifact")
+
+    handles: dict[str, WorktreeHandle] = {}
+    for st in subtasks:
+        session_id = f"{artifact['run_id']}-{st['task_id']}"
+        handles[st["task_id"]] = create_agent_worktree(
+            repo_path=repo_path, base_ref=base_ref, session_id=session_id, worktrees_root=worktrees_root
+        )
+    return handles
+
+
 class WorktreeLeaseManager:
     """Enforces "two agents never hold the same git worktree
     simultaneously" for the full duration an agent is actively using a

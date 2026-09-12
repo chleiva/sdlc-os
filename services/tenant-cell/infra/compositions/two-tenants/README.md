@@ -39,12 +39,21 @@ resources:
 
 ```
 Changes to Outputs:
-  + acme_namespace          = "model-serving-acme"
-  + acme_node_pool_name     = "pilot-aws-g7e-tenant-acme-gpu-node-pool"
-  + globex_namespace        = "model-serving-globex"
-  + globex_node_pool_name   = "pilot-aws-g7e-tenant-globex-gpu-node-pool"
+  + acme_namespace          = "model-serving-acme-822b33ad"
+  + acme_node_pool_name     = "pilot-aws-g7e-tenant-acme-822b33ad-gpu-node-pool"
+  + globex_namespace        = "model-serving-globex-5bc1a08d"
+  + globex_node_pool_name   = "pilot-aws-g7e-tenant-globex-5bc1a08d-gpu-node-pool"
   + pool_names_are_distinct = true
 ```
+
+The `-822b33ad`/`-5bc1a08d` suffixes are the first 8 hex characters of
+`sha256("acme")`/`sha256("globex")` -- `main.tf`'s `local.tenant_slug`
+formula, replicated exactly in
+`services/tenant-cell/src/tenant_cell/naming.py`. Running
+`tenant_cell.naming.node_pool_name("pilot-aws-g7e", "acme")` in the
+control-plane's own Python package produces the byte-for-byte identical
+string `"pilot-aws-g7e-tenant-acme-822b33ad-gpu-node-pool"` -- confirmed
+directly against this same `tofu plan` run, not just asserted in prose.
 
 ...and 18 real resources fully planned across both tenants before it
 errors, including (per tenant) a distinctly-named `aws_iam_role.node`,
