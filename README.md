@@ -55,6 +55,42 @@ python3 -m venv .venv
 `infra/` is [OpenTofu](https://opentofu.org/) (`tofu`, not the Terraform
 CLI) — see `infra/README.md`.
 
+## Docker Compose deployment
+
+For a single-tenant, single-host deployment (master spec §14.16) rather
+than the multi-tenant Kubernetes architecture above:
+
+```bash
+cp .env.example .env    # fill in real values -- see the file's own comments
+docker compose up -d --build
+```
+
+This brings up every service on one Docker network, fronted by a Caddy
+reverse proxy (real TLS -- self-signed by default, or a real Let's
+Encrypt certificate once `.env`'s `CADDY_DOMAIN` is a real hostname) at
+`https://localhost/` (the Fleet Control Dashboard) and
+`https://localhost/webhook` (the job dispatcher's webhook endpoint).
+`docker compose --profile observability up -d` additionally starts an
+optional Prometheus/Grafana/Loki/Tempo stack (§16.4) — nothing else
+depends on it.
+
+**Read this before relying on it as a real deployment**: this mode
+packages exactly what exists in `services/` today. Only `job-dispatcher`
+and `fleet-dashboard` are real, network-reachable HTTP services;
+`run-registry` has no server process of its own (every consumer embeds
+it as a library against one shared SQLite volume); `index-server` and
+`mcp-stubs` speak real MCP but only over stdio, not network; and
+`orchestrator`/`gates`/`verification-pipeline`/`issue-tracker`/
+`source-control` have no standalone process entrypoint in this codebase
+at all — their containers build the image and run that package's own
+real test suite as a self-check, then exit. `docker-compose.yml`'s own
+top-of-file comment explains each of these honestly, service by
+service, along with the one known gap this packaging step could not
+close without editing another deliverable's source: job-dispatcher's
+capacity provider is still hardcoded to `MockCapacityProvider` (there is
+no existing config-driven way to select D1's new `LocalCapacityProvider`
+at process startup).
+
 ## Contributing
 
 See `CLAUDE.md` for repo conventions (this doubles as the guide

@@ -1,0 +1,340 @@
+# SDLC Auto -- Docker Compose deployment mode (D14, master spec §14.16).
+#
+# `docker compose up -d` (with a filled-in `.env`, copied from
+# `.env.example`) brings up every component of the System as ordinary
+# containers on one Docker network, at the smallest possible scale (one
+# host) -- an addition to, not a replacement for, the multi-tenant
+# Kubernetes architecture under `infra/` (§14.16's own framing).
+#
+# ---------------------------------------------------------------------
+# READ BEFORE RELYING ON THIS AS A "REAL" DEPLOYMENT
+# ---------------------------------------------------------------------
+# This packages what exists in `services/` today, honestly, not what
+# the master spec's steady-state architecture eventually implies:
+#
+# 1. Run Registry (F2) has no network-reachable server process in this
+#    codebase -- every service that needs it (job-dispatcher,
+#    fleet-dashboard, orchestrator, gates) links it in as an *embedded
+#    library* against one shared SQLite file. That file lives on the
+#    `run-registry-data` named volume below, mounted into every
+#    container that needs it at the same path
+#    (`RUN_REGISTRY_DB_PATH=/data/registry/registry.db`) -- this is the
+#    real current integration shape, not a network service standing in
+#    for one. The `run-registry` container itself only applies pending
+#    migrations against that volume once, then exits (see its
+#    Dockerfile) -- it is not expected to show "Up" in `docker compose
+#    ps`.
+# 2. job-dispatcher and fleet-dashboard are the only two components
+#    with a real, documented, network-reachable HTTP entrypoint. Every
+#    other component here (orchestrator, gates, verification-pipeline,
+#    issue-tracker, source-control) has **no standalone process
+#    entrypoint** in this codebase today -- see each service's own
+#    Dockerfile for exactly what's real there instead (mostly: build
+#    the image, run that package's own real, documented test command as
+#    a build-time self-check, then exit -- `restart: "no"` below). None
+#    of that is invented to satisfy this file; it is what each
+#    service's own README documents (or doesn't).
+# 3. index-server and mcp-stubs run their real, documented server.py
+#    entrypoints, but those speak MCP over **stdio**, not a network
+#    socket -- they are meant to be spawned as local subprocesses by
+#    whatever process needs them (see orchestrator/mcp_clients.py and
+#    verification-pipeline/index_client.py + ci_client.py, which do
+#    exactly that against a sibling checkout). Running them as
+#    standalone containers here is for image-build completeness and
+#    manual inspection only; nothing on this compose network actually
+#    talks stdio-MCP to them across a container boundary today.
+# 4. job-dispatcher's capacity provider is still `MockCapacityProvider`,
+#    hardcoded in its own `__main__.py` -- there is no existing
+#    config-driven way to select D1's new `LocalCapacityProvider`
+#    (`local_capacity.py`) at process startup, and D14 is not permitted
+#    to add one without editing job-dispatcher's own source. This is a
+#    real, current gap, not something this compose file works around.
+#
+# See the top-level README's "Docker Compose deployment" section for
+# the human setup steps (§17.4 secrets, TLS, etc.) this file assumes.
+
+networks:
+  sdlc-net:
+    name: sdlc-net
+
+volumes:
+  run-registry-data:
+  caddy-data:
+  caddy-config:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:
+
+services:
+  # -------------------------------------------------------------------
+  # F2 -- Run Registry: one-shot migration-apply against the shared
+  # SQLite volume (see note 1 above). Every dependent below waits for
+  # this to exit 0 before starting.
+  # -------------------------------------------------------------------
+  run-registry:
+    build:
+      context: .
+      dockerfile: services/run-registry/Dockerfile
+    networks: [sdlc-net]
+    volumes:
+      - run-registry-data:/data/registry
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # D1 -- Job Dispatcher: the one real, network-reachable webhook
+  # receiver (POST /webhook, GET /healthz). Not published directly to
+  # the host -- reached only through the `caddy` reverse proxy.
+  # -------------------------------------------------------------------
+  job-dispatcher:
+    build:
+      context: .
+      dockerfile: services/job-dispatcher/Dockerfile
+    networks: [sdlc-net]
+    depends_on:
+      run-registry:
+        condition: service_completed_successfully
+    environment:
+      TENANT_ID: ${TENANT_ID}
+      JIRA_PROJECT_KEY: ${JIRA_PROJECT_KEY}
+      JIRA_WEBHOOK_SECRET: ${JIRA_WEBHOOK_SECRET}
+      JIRA_BASE_URL: ${JIRA_BASE_URL}
+      JIRA_AUTH_MODE: ${JIRA_AUTH_MODE}
+      JIRA_OAUTH_BEARER_TOKEN: ${JIRA_OAUTH_BEARER_TOKEN}
+      JIRA_BASIC_AUTH_EMAIL: ${JIRA_BASIC_AUTH_EMAIL}
+      JIRA_BASIC_AUTH_API_TOKEN: ${JIRA_BASIC_AUTH_API_TOKEN}
+      JIRA_OPT_IN_LABEL: ${JIRA_OPT_IN_LABEL}
+      JIRA_TRIGGER_STATUS: ${JIRA_TRIGGER_STATUS}
+      JIRA_APPROVAL_STATUS: ${JIRA_APPROVAL_STATUS}
+      JIRA_CHANGE_REVIEW_STATUS: ${JIRA_CHANGE_REVIEW_STATUS}
+      JIRA_SIZE_FIELD_MODE: ${JIRA_SIZE_FIELD_MODE}
+      JIRA_EPIC_LINK_MODE: ${JIRA_EPIC_LINK_MODE}
+      RUN_REGISTRY_DB_PATH: /data/registry/registry.db
+      JOB_DISPATCHER_PORT: ${JOB_DISPATCHER_PORT:-8809}
+    volumes:
+      - run-registry-data:/data/registry
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # D8 -- Fleet Control Dashboard: the other real, network-reachable
+  # HTTP service (read-only Kanban view over the Registry).
+  # -------------------------------------------------------------------
+  fleet-dashboard:
+    build:
+      context: .
+      dockerfile: services/fleet-dashboard/Dockerfile
+    networks: [sdlc-net]
+    depends_on:
+      run-registry:
+        condition: service_completed_successfully
+    environment:
+      RUN_REGISTRY_DB_PATH: /data/registry/registry.db
+      FLEET_DASHBOARD_HOST: 0.0.0.0
+      FLEET_DASHBOARD_PORT: ${FLEET_DASHBOARD_PORT:-8808}
+    volumes:
+      - run-registry-data:/data/registry
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # D2 -- Orchestrator core. No standalone process entrypoint exists in
+  # this codebase (see note 2 above) -- this builds the image (incl. the
+  # Rev 9 multi-vendor backends + Docker-sandbox tier) and runs its own
+  # test suite as a self-check, then exits.
+  # -------------------------------------------------------------------
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    networks: [sdlc-net]
+    depends_on:
+      run-registry:
+        condition: service_completed_successfully
+    environment:
+      ORCHESTRATOR_INFERENCE_VENDOR: ${ORCHESTRATOR_INFERENCE_VENDOR:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      RUN_REGISTRY_DB_PATH: /data/registry/registry.db
+    volumes:
+      - run-registry-data:/data/registry
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # D9 -- Gates. No standalone process entrypoint exists (note 2 above)
+  # -- builds the image with all five real sibling deps and runs its
+  # test suite as a self-check, then exits.
+  # -------------------------------------------------------------------
+  gates:
+    build:
+      context: .
+      dockerfile: services/gates/Dockerfile
+    networks: [sdlc-net]
+    depends_on:
+      run-registry:
+        condition: service_completed_successfully
+    environment:
+      RUN_REGISTRY_DB_PATH: /data/registry/registry.db
+    volumes:
+      - run-registry-data:/data/registry
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # D7 -- Verification Pipeline. No standalone process entrypoint exists
+  # (note 2 above); does not use the Run Registry at all (its own
+  # README/code never imports run_registry). Builds the image (with
+  # index-server + mcp-stubs copied in for its real subprocess MCP
+  # clients) and runs its test suite as a self-check, then exits.
+  # -------------------------------------------------------------------
+  verification-pipeline:
+    build:
+      context: .
+      dockerfile: services/verification-pipeline/Dockerfile
+    networks: [sdlc-net]
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # D3 -- Index Server: real MCP server, stdio transport only (note 3
+  # above) -- not reachable over sdlc-net today. Kept "up" because the
+  # real command blocks reading stdin; use `docker compose exec
+  # index-server ...` for manual inspection.
+  # -------------------------------------------------------------------
+  index-server:
+    build:
+      context: .
+      dockerfile: services/index-server/Dockerfile
+    networks: [sdlc-net]
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # D4 -- Issue Tracker (Jira). No standalone process entrypoint exists
+  # (note 2 above; its mcp_server.py needs a real per-tenant
+  # client_for_tenant factory this repo never wires up) -- builds the
+  # image and runs its test suite as a self-check, then exits.
+  # -------------------------------------------------------------------
+  issue-tracker:
+    build:
+      context: .
+      dockerfile: services/issue-tracker/Dockerfile
+    networks: [sdlc-net]
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # D5 -- Source Control (GitHub App). Its real main() intentionally
+  # raises SystemExit until a KMS-backed InstallationRegistry exists
+  # (note 2 above and CLAUDE.md's known gap) -- default command here is
+  # its own test suite instead, so this container doesn't restart-loop
+  # against a command designed to fail today.
+  # -------------------------------------------------------------------
+  source-control:
+    build:
+      context: .
+      dockerfile: services/source-control/Dockerfile
+    networks: [sdlc-net]
+    environment:
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+    volumes:
+      # Real GitHub App private key, mounted read-only -- never baked
+      # into the image or set as a plain env var (§17.4).
+      - ${GITHUB_APP_PRIVATE_KEY_PATH:-./deploy/secrets/github-app-private-key.pem}:/run/secrets/github-app-private-key.pem:ro
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # F3 -- MCP stubs. Real stdio MCP servers; only `ci` has no real
+  # implementation elsewhere in this repo (note 3 above), so that's the
+  # default command. Not reachable over sdlc-net today (stdio only).
+  # -------------------------------------------------------------------
+  mcp-stubs:
+    build:
+      context: .
+      dockerfile: services/mcp-stubs/Dockerfile
+    networks: [sdlc-net]
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # Reverse proxy (TLS termination + routing, §4.4/§16.5). The only
+  # service published to the host.
+  # -------------------------------------------------------------------
+  caddy:
+    image: caddy:2.9-alpine
+    networks: [sdlc-net]
+    depends_on:
+      - job-dispatcher
+      - fleet-dashboard
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+      # Compose's `:-` substitution (unlike the Caddyfile's own `{$VAR:default}`,
+      # which only falls back on a truly *unset* variable, not one set to
+      # an empty string) falls back whenever .env leaves this blank --
+      # exactly what an empty `CADDY_ACME_EMAIL=` in .env.example does.
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-admin@localhost}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+  # ===================================================================
+  # Optional observability profile (§16.4, made optional by §14.16):
+  #   docker compose --profile observability up
+  # Genuinely optional -- no service above depends_on any of these.
+  # Plain Docker images standing in for infra/modules/observability's
+  # Helm-chart-based kube-prometheus-stack/Loki/Tempo (no
+  # docker-compose-friendly config existed for that module; this is a
+  # minimal, real, working equivalent, not a placeholder -- see
+  # deploy/observability/'s own configs for exactly what's wired versus
+  # a documented starting point, e.g. no service here exposes a
+  # Prometheus /metrics endpoint yet).
+  # ===================================================================
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    profiles: ["observability"]
+    networks: [sdlc-net]
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.7
+    profiles: ["observability"]
+    networks: [sdlc-net]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./deploy/observability/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.9.0
+    profiles: ["observability"]
+    networks: [sdlc-net]
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.3.0
+    profiles: ["observability"]
+    networks: [sdlc-net]
+    depends_on: [prometheus, loki, tempo]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped

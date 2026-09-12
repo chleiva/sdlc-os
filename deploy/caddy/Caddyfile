@@ -1,0 +1,43 @@
+# D14 -- reverse proxy for the Docker Compose deployment mode (master
+# spec §14.16). Routes:
+#   - the job dispatcher's real webhook endpoint (POST /webhook) and its
+#     health check (GET /healthz) -- §4.4's webhook trigger design;
+#     §17.3's HMAC verification happens *behind* this proxy, inside
+#     job-dispatcher itself, not instead of it.
+#   - everything else to the Fleet Control Dashboard (§16.5).
+#
+# TLS: Caddy issues a real certificate for whatever `CADDY_DOMAIN` is set
+# to in `.env`.
+#   - Local/eval use (the default, `CADDY_DOMAIN=localhost`): `tls
+#     internal` makes Caddy mint its own local CA and a certificate off
+#     it -- trust that CA in your OS/browser to avoid a self-signed
+#     warning, or just click through it for local testing.
+#   - Real deployment: set `CADDY_DOMAIN` to a real, DNS-resolvable
+#     hostname pointing at this host, set `CADDY_ACME_EMAIL`, and delete
+#     the `tls internal` line below -- Caddy then obtains and renews a
+#     real Let's Encrypt certificate for that hostname automatically, no
+#     other change needed.
+
+{
+	# docker-compose.yml passes this with its own `${CADDY_ACME_EMAIL:-admin@localhost}`
+	# fallback (not this file's `{$VAR:default}` form -- that one only
+	# falls back on a truly *unset* variable, not one set to an empty
+	# string, which is what an unfilled-in .env leaves it as). Set a
+	# real address in .env before pointing CADDY_DOMAIN at a real
+	# hostname for Let's Encrypt -- unused while "tls internal" is in
+	# effect below.
+	email {$CADDY_ACME_EMAIL}
+}
+
+{$CADDY_DOMAIN:localhost} {
+	tls internal
+
+	@webhook path /webhook* /healthz
+	handle @webhook {
+		reverse_proxy job-dispatcher:8809
+	}
+
+	handle {
+		reverse_proxy fleet-dashboard:8808
+	}
+}

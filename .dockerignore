@@ -1,0 +1,35 @@
+# Root .dockerignore -- every service Dockerfile builds with the repo
+# root as its build context (so a Dockerfile can COPY sibling
+# deliverables it depends on, e.g. job-dispatcher copying
+# services/run-registry). This keeps that context small and excludes
+# things that must never end up inside an image.
+
+# Per-service virtualenvs (each service has its own .venv/.venv_check
+# checked out locally for host-side dev/test; never needed nor wanted
+# inside a container image -- the Dockerfiles create their own).
+services/*/.venv/
+services/*/.venv_check/
+services/*/**/__pycache__/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+
+# VCS / editor / OS noise
+.git/
+.gitignore
+**/.DS_Store
+
+# Gitignored internal-only docs (never needed to build an image, and
+# never meant to leave this checkout regardless)
+docs/AI Coding Agentic Solution - Specification (Rev 6).md
+docs/deliverables/
+
+# IaC state/plugins -- irrelevant to any service image
+infra/**/.terraform/
+infra/**/.terraform.lock.hcl
+infra/**/*.tfstate*
+
+# Local, gitignored secrets for this deployment mode -- never baked
+# into an image (see .env.example / README "Docker Compose deployment")
+.env
+deploy/secrets/

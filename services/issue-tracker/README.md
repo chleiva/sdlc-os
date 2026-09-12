@@ -44,7 +44,13 @@ SETUP.md               the manual runbook for a human with real Jira access
 
 ```sh
 cd services/issue-tracker
-python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+python3 -m venv .venv
+# kms-boundary first: this package's own pyproject.toml depends on it
+# (TenantJiraConfig.from_wrapped_oauth_token's real Sec. 17.3 KMS-unwrap
+# path) -- undocumented here until a Docker Compose packaging pass
+# (D14) hit the resulting install failure and traced it back.
+.venv/bin/pip install -e ../kms-boundary
+.venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
 ```
 

@@ -8,6 +8,13 @@ docs/
 # --- OS / editor cruft ------------------------------------------------------
 .DS_Store
 
+# --- D14: Docker Compose deployment mode local secrets (§17.4) -------------
+# `.env` holds real secret values a deployer fills in from `.env.example`;
+# never committed. `deploy/secrets/` is this mode's local-secret-file
+# mount point (e.g. the GitHub App private key) -- never committed either.
+.env
+deploy/secrets/
+
 # --- Claude Code local-only state ------------------------------------------
 .claude/settings.local.json
 .claude/hooks/

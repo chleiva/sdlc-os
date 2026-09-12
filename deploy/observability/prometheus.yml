@@ -1,0 +1,28 @@
+# D14 -- optional observability profile (master spec §16.4, made
+# optional per §14.16 -- `docker compose --profile observability up`).
+#
+# Honest starting point, not a finished dashboard: no service in
+# services/ currently exposes a Prometheus-scrapeable /metrics HTTP
+# endpoint. `services/observability`'s own design (client.py/sink.py)
+# deliberately routes logs/metrics/traces through its own sink
+# abstraction rather than OTel's Metrics SDK directly (see that
+# package's module docstrings) -- there is no existing
+# docker-compose-friendly exporter to point Prometheus at yet. This
+# scrapes Prometheus itself (a real, working target, proving the stack
+# runs) and leaves commented-out entries for the two HTTP services this
+# repo does have, for whenever they (or services/observability) grow a
+# real /metrics endpoint.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # - job_name: job-dispatcher
+  #   static_configs:
+  #     - targets: ["job-dispatcher:8809"]
+  # - job_name: fleet-dashboard
+  #   static_configs:
+  #     - targets: ["fleet-dashboard:8808"]

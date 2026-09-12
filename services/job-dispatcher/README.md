@@ -23,10 +23,15 @@ cd services/job-dispatcher
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -e ../run-registry
+# kms-boundary before issue-tracker: issue-tracker's own pyproject.toml
+# depends on it (its real Sec. 17.3 KMS-unwrap path) -- undocumented
+# here until a Docker Compose packaging pass (D14) hit the resulting
+# install failure and traced it back.
+.venv/bin/pip install -e ../kms-boundary
 .venv/bin/pip install -e ../issue-tracker
 .venv/bin/pip install -e ".[dev]"
 # re-assert editable installs (pip's own resolution step above can
-# silently reinstall these two path deps non-editably as a side effect):
+# silently reinstall these path deps non-editably as a side effect):
 .venv/bin/pip install -e ../run-registry --force-reinstall --no-deps
 .venv/bin/pip install -e ../issue-tracker --force-reinstall --no-deps
 
@@ -46,3 +51,11 @@ needed.
 ```
 
 (copy `config/tenants.example.json` to `config/tenants.json` first).
+
+**(New, Rev 9)** `--capacity-provider {mock,local}` (default `mock`,
+unchanged): pass `--capacity-provider local` to use `LocalCapacityProvider`
+(`local_capacity.py`) instead — the always-available provider for the
+Section 14.16 Docker Compose deployment mode, used when there is no GPU
+to provision because inference is delegated to an external API-key
+vendor (Section 13.8). The top-level `docker-compose.yml` packaging
+(D14) defaults to `local` for exactly this reason.

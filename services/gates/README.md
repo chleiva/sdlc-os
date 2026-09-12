@@ -58,6 +58,11 @@ services/gates/
 ```bash
 cd services/gates
 python3 -m venv .venv
+# kms-boundary first: issue-tracker's own pyproject.toml depends on it
+# (its real Sec. 17.3 KMS-unwrap path) -- undocumented here until a
+# Docker Compose packaging pass (D14) hit the resulting install failure
+# and traced it back.
+.venv/bin/pip install -e ../kms-boundary
 .venv/bin/pip install -e '.[dev]' \
   -e ../run-registry \
   -e ../orchestrator \
