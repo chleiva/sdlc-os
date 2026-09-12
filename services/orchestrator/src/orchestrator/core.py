@@ -444,11 +444,36 @@ class Orchestrator:
         if progress is None:
             progress = self.progress_store.start_new(run_id=run.id, attempt_id=run.current_attempt_id or "")
 
+        from orchestrator.model_backend import SubTask  # local import: avoid cycle at module load
+
         subtask = self._next_subtask(artifact, progress)
         if subtask is None:
-            return "verify"  # every subtask done
-
-        from orchestrator.model_backend import SubTask  # local import: avoid cycle at module load
+            if not progress.last_verification_failure_summary:
+                return "verify"  # every subtask done, no pending failure to address
+            # (New, Rev 9 real-live-run fix) Every plan subtask is complete,
+            # but we're here because VERIFICATION failed and _drive routed
+            # back to IMPLEMENTATION for a retry (Sec. 9.3's bounded retry
+            # budget) -- with no unfinished subtask, this is the one real
+            # chance for the agent to see *why* it failed and fix it, rather
+            # than the run silently re-verifying the same unfixed code.
+            # Ephemeral by design: not added to completed_subtask_ids (it has
+            # no entry in the plan's own subtask_graph to be "done" against),
+            # so it never confuses _next_subtask's real-subtask bookkeeping.
+            fixup_subtask = SubTask(
+                task_id=f"verification-fixup-{uuid4().hex[:8]}",
+                description=(
+                    "The previous implementation failed verification. Fix the "
+                    f"issue(s) described below and ensure the code is correct:\n\n"
+                    f"{progress.last_verification_failure_summary}"
+                ),
+                parallel_group=None,
+            )
+            diff = self.agent_backend.implement_subtask(run_context=self._run_context(run), subtask=fixup_subtask)
+            progress.files_touched = sorted(set(progress.files_touched) | set(diff.files_touched))
+            progress.lines_changed += diff.lines_changed
+            progress.last_verification_failure_summary = ""
+            self.progress_store.save(progress)
+            return "verify"
 
         diff = self.agent_backend.implement_subtask(
             run_context=self._run_context(run),
@@ -547,10 +572,15 @@ class Orchestrator:
 
         if result.passed:
             progress.consecutive_same_stage_failures = 0
+            progress.last_verification_failure_summary = ""
             self.progress_store.save(progress)
             return "passed"
 
         progress.consecutive_same_stage_failures += 1
+        # (New, Rev 9 real-live-run fix) Recorded so _implementation_step can
+        # give the agent a real chance to fix this specific failure on the
+        # next pass through IMPLEMENTATION -- see that method's own comment.
+        progress.last_verification_failure_summary = result.summary
         self.progress_store.save(progress)
 
         triggers = evaluate_checkpoints(

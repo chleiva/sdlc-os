@@ -36,6 +36,16 @@ class RunProgress:
     consecutive_same_stage_failures: int = 0
     started_at: str = field(default_factory=_now_iso)
     acknowledged_checkpoint_signatures: list[str] = field(default_factory=list)
+    # (New, Rev 9 real-live-run fix) The most recent VerificationResult.summary
+    # when verification fails and the run loops back to IMPLEMENTATION for a
+    # retry -- real bug this closes, found on a real live run: with every
+    # plan subtask already in completed_subtask_ids, "retry" previously sent
+    # the run back to IMPLEMENTATION with nothing for `_next_subtask` to find,
+    # so it went straight back to VERIFICATION and failed identically forever
+    # (the agent never saw *why* it failed or got a chance to fix it). Empty
+    # string means "no pending verification failure to address" (the default,
+    # and cleared again once a fix-up subtask has been attempted).
+    last_verification_failure_summary: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

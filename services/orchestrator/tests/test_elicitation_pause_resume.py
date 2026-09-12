@@ -93,7 +93,23 @@ def test_time_cost_checkpoint_fires_at_80_percent_not_100_percent(registry, tena
 def test_stuck_checkpoint_fires_after_default_retry_budget_exhausted(registry, tenant_id, plan_store, progress_store):
     plan = make_plan_output(story_size="S", subtasks=[SubTask(task_id="t1", description="a", parallel_group=None, depends_on=())])
     diff = make_diff_output(lines_changed=1)
-    backend = ScriptedAgentBackend(plans=[plan], diffs=[diff])
+    # Two more scripted diffs: real-live-run fix (found on this repo's
+    # first actual live run against a real model/real verification -- see
+    # core.py's _implementation_step) -- once every real plan subtask is
+    # complete, a verification failure that routes back to IMPLEMENTATION
+    # (Sec. 9.3's bounded retry budget -- "loop back to implementation",
+    # not "silently re-verify the same code") now gives the agent one real
+    # "fix-up" implement_subtask call carrying the specific failure summary.
+    # Trace: fail 1 (count=1, below budget) -> fix-up -> fail 2 (count=2,
+    # below budget) -> fix-up -> fail 3 (count=3, budget reached) -> STUCK,
+    # pauses *before* a third fix-up (the run's `stage` never left
+    # VERIFICATION during the retries above, so resolving the stuck
+    # checkpoint with "continue" re-enters VERIFICATION directly, not
+    # IMPLEMENTATION) -> the verifier's 4th scripted result ("finally
+    # passes") is what resolves it. Three implement_subtask calls total:
+    # the original subtask, plus fix-ups for "fail 1" and "fail 2".
+    fixup_diffs = [make_diff_output(lines_changed=1) for _ in range(2)]
+    backend = ScriptedAgentBackend(plans=[plan], diffs=[diff, *fixup_diffs])
     # 3 consecutive failures then a pass -- DEFAULT_STUCK_RETRY_BUDGET is 3.
     verifier = ScriptedVerificationRunner(
         [
@@ -115,7 +131,13 @@ def test_stuck_checkpoint_fires_after_default_retry_budget_exhausted(registry, t
     assert status.checkpoint.trigger == "stuck"
     assert status.checkpoint.details["consecutive_failures"] == 3
 
-    # Resolving with "continue" lets the (now-passing) verifier run once
-    # more and proceed to the change-review gate.
+    # Resolving with "continue" re-enters VERIFICATION directly (stage
+    # never left it during the auto-retries above) -- the verifier's 4th
+    # scripted result ("finally passes") is what proceeds to the
+    # change-review gate; no further implement_subtask call happens here.
     status = orch.resolve_checkpoint(status.run_id, decision="continue")
     assert status.stage == "change_review_gate"
+    # The original subtask + fix-ups for "fail 1" and "fail 2" (not "fail
+    # 3" -- that one triggers the stuck pause before a corresponding
+    # fix-up would run).
+    assert backend.implement_call_count == 3
