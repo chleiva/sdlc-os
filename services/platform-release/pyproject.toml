@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "platform-release"
+version = "0.1.0"
+description = "D12: Platform Release Engineering -- ordinary CI, canary rollout, rollback, and infra module versioning for the System's own codebase (SDLC Auto, Wave 3)"
+requires-python = ">=3.11"
+dependencies = [
+    # No in-repo local-package dependency is required for this
+    # deliverable's own logic (contract_ci.py shells out to each
+    # service's own already-installed .venv rather than importing it).
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/platform_release"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evaluation-harness"
+version = "0.1.0"
+description = "D13: Evaluation Harness -- benchmark suite runner, semantic-correctness spot-check sampling, self-hosted-vs-frontier trend, and live production metrics from F2's Registry (SDLC Auto, Wave 3)"
+requires-python = ">=3.11"
+dependencies = [
+    # F2's Registry Service -- Attempt history is this deliverable's
+    # primary data source, read ONLY through the public RegistryService
+    # API (create_run/append_attempt/transition_stage/list_attempts/...),
+    # never by touching its sqlite store directly.
+    "run-registry @ file:../run-registry",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evaluation_harness"]
+
+[tool.hatch.metadata]
+# Needed for the `file:../...` local path dependency above.
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
