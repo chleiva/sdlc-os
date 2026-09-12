@@ -37,8 +37,8 @@ resource "kubernetes_manifest" "firecracker_runtime_class" {
     handler = "firecracker"
     scheduling = {
       nodeSelector = {
-        "sdlc-auto.io/node-pool"        = var.node_pool_name
-        "sdlc-auto.io/sandbox-runtime"  = "firecracker"
+        "sdlc-auto.io/node-pool"       = var.node_pool_name
+        "sdlc-auto.io/sandbox-runtime" = "firecracker"
       }
     }
   }

@@ -18,3 +18,21 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# --- OpenTofu / Terraform ----------------------------------------------------
+# State and local provider caches can hold secrets/resource IDs and are huge —
+# never belong in a public repo regardless of the auto-commit hook's reach.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*tfplan*
+.terraformrc
+terraform.rc
