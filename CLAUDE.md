@@ -8,16 +8,17 @@ anyone — human or AI agent — working in the codebase.
 ## What's here
 
 - `docs/AI Coding Agentic Solution - Specification (Rev 6).md` — the
-  **master spec**, currently **Revision 8** (the filename still says
+  **master spec**, currently **Revision 9** (the filename still says
   "Rev 6" — it was never renamed across revisions; the title block
   *inside* the file is the actual revision, always check that, not the
   filename). Gitignored — internal-only, never pushed to the public repo.
-- `docs/deliverables/` — the spec decomposed into 16 independent
-  build-deliverable briefs, organized into 4 dependency waves (Wave 0
+- `docs/deliverables/` — the spec decomposed into 17 independent
+  build-deliverable briefs, organized into 5 dependency waves (Wave 0
   foundation → Wave 1 core components → Wave 2 gates/hardening → Wave 3
-  release/eval). `00-README.md` is the index: dependency graph, ground
-  rules for assigning a deliverable to a subagent, file list. Also
-  gitignored, same reason as the master spec.
+  release/eval → Wave 4 alternative deployment mode,
+  `wave4-D14-docker-compose-deployment.md`). `00-README.md` is the
+  index: dependency graph, ground rules for assigning a deliverable to
+  a subagent, file list. Also gitignored, same reason as the master spec.
 - `infra/` — F1's OpenTofu/HCL module tree + environments (tracked, public).
 - `services/<deliverable>/` — one directory per implemented deliverable:
   `run-registry` (F2), `mcp-stubs` (F3), `index-server` (D3),
@@ -25,12 +26,26 @@ anyone — human or AI agent — working in the codebase.
   `job-dispatcher` (D1), `orchestrator` (D2), `tenant-cell` (D6),
   `verification-pipeline` (D7), `gates` (D9), `security-hardening`
   (D10), `observability` (D11), `platform-release` (D12),
-  `evaluation-harness` (D13). Tracked, public. Each is Python, has its
+  `evaluation-harness` (D13), `kms-boundary` (per-tenant KMS envelope
+  encryption, spec §17.3 — a real gap D10's audit found, closed as its
+  own small service rather than folded into an existing one, consumed
+  as a sibling dependency by `source-control`/`issue-tracker`). Tracked,
+  public. Each is Python, has its
   own `pyproject.toml`/`requirements.txt` + `.venv`, and its own README
   with exact run/test instructions — read the service's own README
   before assuming how to install/run it (a couple require a `pip
   install -e ../<dep> --force-reinstall --no-deps` step after the
   normal install; documented per-service, not universal).
+- `docker-compose.yml` (repo root), `deploy/` (`deploy/caddy`'s reverse-
+  proxy config, `deploy/job-dispatcher`'s packaging-only entrypoint/
+  config-renderer, `deploy/observability`'s optional Prometheus/Grafana/
+  Loki/Tempo profile), and a `Dockerfile` inside each `services/
+  <deliverable>/` directory — D14's Docker Compose deployment packaging
+  (§14.16, Wave 4). Tracked, public. Packaging only: it doesn't modify
+  any service's own logic or entrypoint, only how it's built and
+  networked — see `docker-compose.yml`'s own top-of-file comment and
+  each `Dockerfile`'s own comment for exactly what's real versus a
+  build-time self-check for that service today.
 
 ## The one rule everything else follows
 
@@ -142,13 +157,41 @@ human decision before this goes anywhere near real tenant data:
   from spec §9.5 text**, since D7 landed before `orchestrator` did — it
   hasn't been diffed against what `orchestrator` actually emits.
   Reconcile before relying on both together.
+- **`orchestrator` has no real process entrypoint** — it's a library
+  driven by tests so far, not something any other component in this
+  codebase calls at runtime (`job-dispatcher` doesn't dispatch to it).
+  D14's Docker Compose packaging works around this honestly: its
+  container builds the image and runs the package's own test suite as
+  a build-time self-check, then exits, rather than staying up as a
+  service. A real entrypoint `job-dispatcher` can actually call is
+  still open.
+- **The Run Registry has no network-reachable server** — every
+  consumer (`job-dispatcher`, `fleet-dashboard`, `orchestrator`,
+  `gates`) links F2 in as an embedded library against one shared SQLite
+  file, never a client/server call. D14's Docker Compose packaging
+  works around this with a shared Docker volume, not a real Registry
+  service — the same underlying gap the first bullet above already
+  flags, now also visible in how the compose stack has to be wired.
 
 ## Current status
 
-Specification: Revision 8, multi-tenant architecture designed in. All 16
-deliverables across all 4 waves — Wave 0 (F1, F2, F3), Wave 1 (D1–D8),
-Wave 2 (D9–D11), Wave 3 (D12, D13) — have a real, independently-verified
-implementation under `services/`/`infra/`. See "Known cross-deliverable
-gaps" above for what's still open before a real deployment; see each
-service's own README for what's real versus mocked at its own external
-boundary.
+Specification: Revision 9, multi-tenant architecture designed in. All 17
+deliverables across all 5 waves — Wave 0 (F1, F2, F3), Wave 1 (D1–D8),
+Wave 2 (D9–D11), Wave 3 (D12, D13), Wave 4 (D14) — have a real,
+independently-verified implementation under `services/`/`infra/` (D14
+additionally under the repo root: `docker-compose.yml`, `deploy/`, and a
+`Dockerfile` per service). Two deployment modes now exist side by side:
+the original multi-tenant, self-hosted-GPU cloud architecture, and a
+single-tenant Docker Compose stack that delegates model inference to an
+external API-key vendor (§13.8) — see the top-level README's "Quick
+start" and "Multi-tenant cloud deployment" sections. Two gaps from the
+Docker Compose pass are worth stating plainly rather than glossing over:
+there is no real orchestrator process entrypoint yet (it's a library
+driven by tests so far — its container currently just runs its test
+suite as a self-check, not a running service), and the Run Registry has
+no network-reachable server (every consumer uses it as an embedded
+library against one SQLite file — the compose packaging works around
+this with a shared Docker volume). See "Known cross-deliverable gaps"
+above for the full list of what's still open before a real deployment;
+see each service's own README for what's real versus mocked at its own
+external boundary.
