@@ -15,6 +15,13 @@ docs/
 .env
 deploy/secrets/
 
+# --- deploy/run-worker: local live-run tool's own state --------------------
+# Real Run Registry DB, plan/progress JSON stores, and real git mirror
+# clones this manual tool creates on disk -- never committed, same
+# reasoning as .env above (real, tenant-specific state, not source).
+deploy/run-worker/data/
+deploy/run-worker/mirrors/
+
 # --- Claude Code local-only state ------------------------------------------
 .claude/settings.local.json
 .claude/hooks/
