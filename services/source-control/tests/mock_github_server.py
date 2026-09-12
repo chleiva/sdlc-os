@@ -62,6 +62,7 @@ def verify_app_jwt(token: str, public_key: RSAPublicKey, *, expected_app_id: str
 class MockGitHubState:
     app_id: str
     app_public_key: RSAPublicKey
+    app_slug: str = "sdlc-auto-mock"
     revoked_installations: set = field(default_factory=set)
     force_5xx_next: int = 0
     force_rate_limit_next: int = 0
@@ -227,6 +228,9 @@ class MockGitHubHandler(BaseHTTPRequestHandler):
         path, query = self._path_and_query()
         self.state.call_log.append(("GET", path))
 
+        if path == "/app":
+            return self._handle_get_app()
+
         if self._maybe_inject_failure():
             return
 
@@ -307,6 +311,26 @@ class MockGitHubHandler(BaseHTTPRequestHandler):
 
         self._json(404, {"message": "Not Found"})
 
+    def _handle_get_app(self) -> None:
+        """GET /app -- real GitHub App-level JWT auth (no installation
+        token involved), returns the App's own metadata. Added to
+        exercise `github_client.GitHubAppClient.get_app_slug`, itself
+        added after a real live run found `audit.bot_actor` raising on
+        an empty `app_slug` (see that method's docstring)."""
+        st = self.state
+        jwt = self._bearer_token()
+        if jwt is None:
+            return self._json(401, {"message": "A JSON web token could not be decoded"})
+        try:
+            verify_app_jwt(jwt, st.app_public_key, expected_app_id=st.app_id)
+        except JWTRejected as e:
+            return self._json(401, {"message": f"Bad credentials: {e}"})
+
+        if self._maybe_inject_failure():
+            return
+
+        self._json(200, {"id": int(st.app_id) if st.app_id.isdigit() else 1, "slug": st.app_slug, "name": st.app_slug})
+
     def _handle_create_installation_token(self, installation_id: str) -> None:
         st = self.state
         jwt = self._bearer_token()
@@ -340,8 +364,8 @@ class MockGitHubHandler(BaseHTTPRequestHandler):
 
 
 class MockGitHubServer:
-    def __init__(self, *, app_id: str, app_public_key: RSAPublicKey):
-        self.state = MockGitHubState(app_id=app_id, app_public_key=app_public_key)
+    def __init__(self, *, app_id: str, app_public_key: RSAPublicKey, app_slug: str = "sdlc-auto-mock"):
+        self.state = MockGitHubState(app_id=app_id, app_public_key=app_public_key, app_slug=app_slug)
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), MockGitHubHandler)
         self._httpd.state = self.state  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)

@@ -30,7 +30,7 @@ def rsa_keypair():
 @pytest.fixture
 def mock_github(rsa_keypair):
     _, public_key, _ = rsa_keypair
-    server = MockGitHubServer(app_id=APP_ID, app_public_key=public_key)
+    server = MockGitHubServer(app_id=APP_ID, app_public_key=public_key, app_slug=APP_SLUG)
     base_url = server.start()
     try:
         yield server, base_url

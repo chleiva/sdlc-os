@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 
 from source_control.app_auth import generate_app_jwt
-from source_control.github_client import GitHubAppClient
+from source_control.github_client import AppCredentials, GitHubAppClient
 
 
 def test_app_jwt_is_signed_and_accepted_by_a_real_rs256_verifier(rsa_keypair):
@@ -97,3 +97,51 @@ def test_installation_token_cache_is_per_installation(github_client: GitHubAppCl
     assert a.token != b.token
     assert server.state.issued_tokens[a.token] == "inst-a"
     assert server.state.issued_tokens[b.token] == "inst-b"
+
+
+def test_get_app_slug_fetches_the_real_slug_from_github(github_client: GitHubAppClient, mock_github):
+    """Real bug found on this repo's first real live run: a caller
+    (deploy/run-worker/live_run.py) hardcoded `AppCredentials.app_slug`
+    to `""`, which blew up the very first `audit.bot_actor` call
+    (`open_pr`'s bookkeeping) with "does not produce a well-formed GitHub
+    bot actor login". Fixed with this real `GET /app` call -- proven here
+    against the mock server's real RS256-verified App JWT auth, same as
+    `create_installation_token` above."""
+    from .conftest import APP_SLUG
+
+    assert github_client.get_app_slug() == APP_SLUG
+
+
+def test_get_app_slug_works_even_when_this_clients_own_credentials_have_no_slug_yet(mock_github, audit_logger, rsa_keypair):
+    """The exact real bootstrap shape `live_run.py` now uses: a
+    throwaway client built with `app_slug=""` (since the real slug isn't
+    known yet) must still be able to make this one call -- it never
+    reads/depends on its own `app_slug`, only the App's private key."""
+    from .conftest import APP_ID, APP_SLUG
+
+    _, _, private_pem = rsa_keypair
+    _, base_url = mock_github
+    bootstrap_client = GitHubAppClient(
+        credentials=AppCredentials(app_id=APP_ID, app_slug="", private_key_pem=private_pem),
+        api_base_url=base_url,
+        audit_logger=audit_logger,
+    )
+    assert bootstrap_client.get_app_slug() == APP_SLUG
+
+
+def test_get_app_slug_raises_upstream_unavailable_on_a_real_5xx_with_no_audit_crash(github_client: GitHubAppClient, mock_github):
+    """`get_app_slug` must surface a real upstream 5xx as
+    `UpstreamUnavailableError` -- and, since it can be called with an
+    empty `app_slug` (see above), it must NOT go through the normal
+    `_map_http_error` audit path, which would itself raise
+    (`bot_actor("")`) and mask the real error."""
+    from source_control.errors import UpstreamUnavailableError
+
+    server, _ = mock_github
+    server.state.force_5xx_next = 1
+
+    try:
+        github_client.get_app_slug()
+        assert False, "expected UpstreamUnavailableError"
+    except UpstreamUnavailableError:
+        pass

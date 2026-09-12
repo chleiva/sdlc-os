@@ -4,7 +4,10 @@ token.
 
 Two authentication modes, both real:
   * App-level JWT (see `app_auth.generate_app_jwt`) -- used for exactly
-    one endpoint, exchanging itself for an installation token.
+    two endpoints: exchanging itself for an installation token
+    (`create_installation_token`), and reading the App's own metadata
+    (`get_app_slug`) -- the latter added on a real live run, see its
+    own docstring for why.
   * Installation access token (`Authorization: Bearer <token>`) -- used
     for every other call in this module. `app_auth.InstallationTokenCache`
     (owned by this client) is the only place that decides whether a
@@ -103,6 +106,39 @@ class GitHubAppClient:
             parsed["expires_at"], "%Y-%m-%dT%H:%M:%SZ"
         ).replace(tzinfo=datetime.timezone.utc).timestamp()
         return InstallationToken(token=parsed["token"], expires_at=expires_at, installation_id=installation_id)
+
+    def get_app_slug(self) -> str:
+        """GET /app, authenticated with the App's own JWT (real bug found
+        on a real live run: `AppCredentials.app_slug` was being hardcoded
+        to `""` by a caller on the theory that it was "only used for
+        audit-log actor display" -- but `audit.bot_actor` actually
+        *requires* a well-formed, non-empty slug and raises otherwise,
+        which surfaced for the first time only once a run reached its
+        first real `open_pr` call. GitHub's own `/app` endpoint returns
+        the slug the App was registered under -- the one real source of
+        truth for it, rather than a human having to transcribe it from
+        the App's settings-page URL into an env var by hand). Callable
+        with any `AppCredentials` (including one built with `app_slug=""`,
+        since this call itself never needs it) -- see `live_run.py` for
+        the real bootstrap sequence this enables.
+
+        Deliberately does NOT route failures through `_map_http_error`
+        like every other call here: that path always audits via
+        `AuditLogger.record`, which itself calls `bot_actor(app_slug)` --
+        exactly the call that raises on an empty slug. Since this method
+        exists specifically to be callable *before* the real slug is
+        known, and it is an app-level bootstrap call with no
+        installation/tenant to attribute anyway, a failure here raises a
+        plain `UpstreamUnavailableError` with no audit record instead."""
+        jwt = generate_app_jwt(self._creds.app_id, self._creds.private_key_pem)
+        status, headers, body = self._send("GET", "/app", auth_header=f"Bearer {jwt}")
+        if status >= 300:
+            try:
+                message = json.loads(body).get("message", body) if body else f"HTTP {status}"
+            except json.JSONDecodeError:
+                message = body or f"HTTP {status}"
+            raise UpstreamUnavailableError(f"fetching App metadata (GET /app): {message}")
+        return json.loads(body)["slug"]
 
     # ------------------------------------------------------------------
     # Authenticated REST calls (installation token)

@@ -136,11 +136,23 @@ def main() -> int:
     mirror_path = MIRRORS_DIR / owner / repo_name
 
     # -- Real GitHub App identity + a real installation token ---------------
+    # Real bug found on this repo's first real `open_pr` call: app_slug
+    # was hardcoded to "" here on the theory that it was "only used for
+    # audit-log actor display" -- but audit.bot_actor actually *requires*
+    # a well-formed, non-empty slug and raises otherwise. Fixed by
+    # bootstrapping the real slug from GitHub itself (GET /app,
+    # GitHubAppClient.get_app_slug) rather than guessing or hand-copying
+    # it into an env var -- a throwaway client with an empty slug is
+    # enough to make that one call, since it never needs its own slug.
+    _bootstrap_client = GitHubAppClient(credentials=AppCredentials(app_id=github_app_id, app_slug="", private_key_pem=private_key_pem))
+    github_app_slug = _bootstrap_client.get_app_slug()
+    print(f"[live_run] Real GitHub App slug: {github_app_slug!r}")
+
     installation = TenantInstallation(
         tenant_id=tenant_id,
         installation_id=github_installation_id,
         app_id=github_app_id,
-        app_slug="",  # only used for audit-log actor display; not required for this to work for real
+        app_slug=github_app_slug,
         private_key_pem=private_key_pem,
         allowed_repositories=frozenset({repository}),
         mirror_root=MIRRORS_DIR,
@@ -149,7 +161,7 @@ def main() -> int:
     registry_sc.register(installation)
     source_control_service = SourceControlService(registry_sc)
 
-    token_client = GitHubAppClient(credentials=AppCredentials(app_id=github_app_id, app_slug="", private_key_pem=private_key_pem))
+    token_client = GitHubAppClient(credentials=AppCredentials(app_id=github_app_id, app_slug=github_app_slug, private_key_pem=private_key_pem))
     token_cache = InstallationTokenCache(token_client)
 
     def _authenticated_remote_url() -> str:
