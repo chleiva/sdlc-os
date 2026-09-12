@@ -175,7 +175,16 @@ jobs:
           - name: platform-release
             dir: services/platform-release
             needs_tofu: true
+            # One real test here (test_contract_ci.py) shells out to
+            # services/mcp-stubs's own .venv/bin/python -m pytest --
+            # it's an integration proof against that real, already-built
+            # service, not a fixture. On a real dev machine that venv
+            # already exists (everyone building this repo sets up every
+            # service's own .venv); a fresh CI checkout has none, so
+            # this job builds mcp-stubs' venv first, the same way its
+            # own matrix entry above does.
             run: |
+              (cd ../mcp-stubs && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt)
               python3 -m venv .venv
               .venv/bin/pip install -e ".[dev]"
               .venv/bin/python -m pytest -q
