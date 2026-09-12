@@ -15,6 +15,27 @@ worktree `SourceControlService.create_branch_worktree` creates):
     .run_static_analysis_layer`) -- real `ruff`/`mypy` runs against the
     same scope.
 
+**Real bug found and fixed during this pass's first live run**: this
+class originally scoped `pytest`/`ruff`/`mypy` to
+`PlanOutput.scope_in`/the plan artifact's `declared_scope.in_scope` --
+`model_backend.PlanOutput.scope_in`'s own docstring says this field
+holds "files/modules the plan expects to touch", but nothing enforces
+that a model actually populates it with real paths rather than prose
+task descriptions (e.g. `"Create hello.py module with greet(name)
+function"` instead of `"hello.py"`). MiniMax M2.5 did exactly that on a
+real live run, which made every real layer fail identically and
+permanently on "no such file or directory" -- since nothing about that
+failure ever changes between retries, it drove Section 9.3's real
+"stuck" checkpoint into firing over and over with no way to resolve
+short of abandoning the run. Fixed: this class now scopes real layers to
+`RunProgress.files_touched` -- the *actual* files
+`BedrockToolUseAgentBackend` observed change on disk via a real `git
+diff` (see `tool_use_bedrock_backend.py`) -- filtered to entries that
+really exist as files, falling back to the plan's declared scope (same
+filter) only if that's empty, and to a whole-workspace scan only if both
+are empty. Real state the system itself already tracked durably, not
+the plan's own aspirational/prose description of it.
+
 **What's honestly not implemented in this pass, stated plainly rather
 than faked**: the other five Section 11.1 layers
 (`acceptance_criteria_mapping`, `security_scan`,
@@ -47,6 +68,7 @@ from verification_pipeline.layers.static_analysis import run_static_analysis_lay
 from verification_pipeline.pipeline import VerificationPipeline
 
 from orchestrator.plan_artifact import PlanArtifactStore
+from orchestrator.progress import RunProgressStore
 from orchestrator.verification import VerificationResult, VerificationRunner
 
 _NOT_IMPLEMENTED_LAYERS = (
@@ -81,17 +103,40 @@ class RealVerificationRunner(VerificationRunner):
     once per run_id and reused across every subsequent call for that
     run, matching `VerificationPipeline`'s own per-story lifecycle."""
 
-    def __init__(self, *, workspace_root: Path, plan_store: PlanArtifactStore) -> None:
+    def __init__(self, *, workspace_root: Path, plan_store: PlanArtifactStore, progress_store: RunProgressStore) -> None:
         self._workspace_root = Path(workspace_root)
         self._plan_store = plan_store
+        self._progress_store = progress_store
         self._pipelines: dict[str, VerificationPipeline] = {}
+
+    def _real_scope_paths(self, run_id: str, artifact: dict) -> list[str]:
+        """Real files first (see module docstring): `RunProgress.
+        files_touched`, filtered to entries that actually exist as files
+        under the workspace. Falls back to the plan's own declared scope
+        (same filter) only if that's empty, and to a whole-workspace scan
+        (`["."]`) only if both are -- never blindly trusts a string the
+        model produced as if it were guaranteed to be a real path."""
+
+        def _existing_files(candidates: list[str]) -> list[str]:
+            return [p for p in candidates if (self._workspace_root / p).is_file()]
+
+        progress = self._progress_store.load(run_id)
+        real_touched = _existing_files(progress.files_touched) if progress is not None else []
+        if real_touched:
+            return real_touched
+
+        declared = _existing_files(artifact.get("declared_scope", {}).get("in_scope", []))
+        if declared:
+            return declared
+
+        return ["."]
 
     def _pipeline_for(self, run_id: str) -> tuple[VerificationPipeline, list[str]]:
         pipeline = self._pipelines.get(run_id)
         artifact = self._plan_store.load_latest(run_id)
         if artifact is None:
             raise RuntimeError(f"no plan artifact for run {run_id!r}; cannot verify")
-        scope_paths = list(artifact["declared_scope"]["in_scope"])
+        scope_paths = self._real_scope_paths(run_id, artifact)
         if pipeline is None:
             story_size = artifact["risk"]["story_size"]
             pipeline = VerificationPipeline(story_id=run_id, retry_budget=RetryBudget.for_story_size(story_size))

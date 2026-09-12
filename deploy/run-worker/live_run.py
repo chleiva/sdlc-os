@@ -183,7 +183,9 @@ def main() -> int:
     registry = RegistryService(str(DATA_DIR / "registry.db"))
     plan_store = PlanArtifactStore(DATA_DIR / "plans")
     progress_store = RunProgressStore(DATA_DIR / "progress")
-    verification_runner = RealVerificationRunner(workspace_root=worktree_path, plan_store=plan_store)
+    verification_runner = RealVerificationRunner(
+        workspace_root=worktree_path, plan_store=plan_store, progress_store=progress_store
+    )
 
     def _packaging_fn(orchestrator: Orchestrator, run, tool_invoker) -> None:
         """Runs at the real PACKAGING stage (core.py's own extension
