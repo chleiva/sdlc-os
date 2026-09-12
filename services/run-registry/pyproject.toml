@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "run-registry"
+version = "0.1.0"
+description = "F2: Run Registry schema + Registry Service (SDLC Auto, Wave 0)"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp==2.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/run_registry"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

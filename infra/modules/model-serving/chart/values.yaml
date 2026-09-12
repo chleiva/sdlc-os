@@ -1,0 +1,32 @@
+# Default values — overridden by modules/model-serving/main.tf's inline
+# `values` block per environment. Kept here so the chart is independently
+# helm-lintable/installable without going through OpenTofu.
+
+environment: "dev"
+tenantId: "shared"
+
+image:
+  repository: vllm/vllm-openai
+  tag: "latest"
+
+model:
+  artifactUri: ""
+  weightChecksum: ""
+  tensorParallel: 1
+  gpuUtilization: 0.9
+
+replicas: 1
+
+nodeSelector: {}
+tolerations: []
+
+terminationGracePeriodSeconds: 90
+
+resources:
+  limits:
+    nvidia.com/gpu: 1
+  requests:
+    nvidia.com/gpu: 1
+
+service:
+  port: 8000

@@ -1,0 +1,12 @@
+# F3 MCP stub servers + contract tests.
+#
+# mcp is pinned to the 2.x line: the master spec (Sec. 7.5) targets the
+# mid-2026 MCP rewrite (stateless request/response, the Tasks extension
+# graduated to first-class, full JSON Schema 2020-12 tool schemas) and mcp
+# 2.x is the first PyPI release built against that rewrite -- 1.x does not
+# have it. See README.md's "Versioning" section: bumping this pin is a
+# reviewed change, not a silent upgrade.
+mcp==2.2.0
+jsonschema==4.26.0
+pytest==9.1.1
+anyio==4.15.1

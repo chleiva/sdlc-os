@@ -1,0 +1,23 @@
+# Copy to terraform.tfvars and adjust. NO secret values belong in this file
+# — see secrets/aws-secrets-manager and bootstrap.sh step 3. `region` is
+# deliberately left unset here: bootstrap.sh's discovery step passes it via
+# -var at apply time (spec §14.8); setting it in a committed .tfvars would
+# be exactly the hardcoded-region anti-pattern the spec calls out.
+
+# region = "eu-south-2"   # example only — do not hardcode; let discovery set this
+
+candidate_regions = ["us-east-1", "us-east-2", "us-west-2", "eu-west-1", "eu-south-2"]
+
+instance_types              = ["g7e.2xlarge"]
+max_interruption_frequency  = "medium"
+
+egress_allowlist = [
+  # e.g. your organization's artifact-store CIDR, Jira/GitHub API ranges.
+  # Empty by default: deny-all beyond the module's own VPC endpoints.
+]
+
+model_artifact_uri    = "s3://CHANGE-ME-org-model-artifacts/ornith-1.5-35b-a3b/nvfp4/CHANGE-ME-checksum/"
+model_weight_checksum = "CHANGE-ME-sha256-of-pinned-artifact"
+
+storage_class = "gp3"
+mesh_enabled  = true

@@ -1,0 +1,909 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sdlc-auto.internal/schemas/mcp/issue-tracker/1.0.0",
+  "title": "Issue-Tracker (Jira) MCP Server -- Tool Contracts",
+  "server": "issue-tracker",
+  "version": "1.0.0",
+  "description": "Scoped to the tenant's own configured Jira projects. Jira is the blackboard of record (spec Sec. 4.4): plans, verification reports, and gate transitions all round-trip through this server.",
+  "tenant_scoping": "may be a single shared, tenant-scoped multi-tenant deployment (spec Sec. 7.6/14.13) -- never holds tenant source code or execution credentials",
+  "contract_shape": "Every tool below follows the same contract shape (spec Sec. 7.6): typed required/optional inputs, a success result shape, a distinct empty result shape, and named error conditions (not-found, permission-denied, rate-limited, upstream-unavailable) that can never be confused with a successful empty result. Every input schema and output schema on this page is JSON Schema 2020-12 (spec Sec. 7.5).",
+  "tools": {
+    "create-epic": {
+      "summary": "Write a new Epic with the fields Sec. 4.4 specifies (sizing label, dependency links).",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "project_key",
+          "summary",
+          "description",
+          "acceptance_criteria"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "project_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "size": {
+            "type": "string",
+            "enum": [
+              "S",
+              "M",
+              "L",
+              "XL"
+            ]
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "issue_key",
+                  "url"
+                ],
+                "properties": {
+                  "issue_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                    "description": "Jira-style issue key, e.g. PROJ-123."
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "An epic with the same summary already exists in this project -- treated as an idempotent no-op, no duplicate created.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              },
+              "existing_issue_key": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                "description": "Jira-style issue key, e.g. PROJ-123."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "create-story": {
+      "summary": "Write a new Story under a parent Epic, sized (S/M/L/XL), with dependency links as native issue links.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "project_key",
+          "epic_key",
+          "summary",
+          "description",
+          "size"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "project_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "epic_key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+            "description": "Jira-style issue key, e.g. PROJ-123."
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "size": {
+            "type": "string",
+            "enum": [
+              "S",
+              "M",
+              "L",
+              "XL"
+            ]
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+              "description": "Jira-style issue key, e.g. PROJ-123."
+            },
+            "description": "Issue keys this story is blocked by."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "issue_key",
+                  "url",
+                  "epic_key"
+                ],
+                "properties": {
+                  "issue_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                    "description": "Jira-style issue key, e.g. PROJ-123."
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "epic_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                    "description": "Jira-style issue key, e.g. PROJ-123."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "A story with the same summary already exists under this epic -- idempotent no-op, no duplicate created.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              },
+              "existing_issue_key": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                "description": "Jira-style issue key, e.g. PROJ-123."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "get-issue": {
+      "summary": "Re-fetch full issue detail by key.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "issue_key"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "issue_key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+            "description": "Jira-style issue key, e.g. PROJ-123."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "issue_key",
+                  "summary",
+                  "status",
+                  "issue_type"
+                ],
+                "properties": {
+                  "issue_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                    "description": "Jira-style issue key, e.g. PROJ-123."
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "issue_type": {
+                    "type": "string",
+                    "enum": [
+                      "Epic",
+                      "Story"
+                    ]
+                  },
+                  "size": {
+                    "type": "string",
+                    "enum": [
+                      "S",
+                      "M",
+                      "L",
+                      "XL"
+                    ]
+                  },
+                  "labels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "links": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "type",
+                        "issue_key"
+                      ],
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "blocks",
+                            "is-blocked-by"
+                          ]
+                        },
+                        "issue_key": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                          "description": "Jira-style issue key, e.g. PROJ-123."
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "The issue key resolves, but the issue has been archived and its content is no longer retrievable -- distinct from not-found (key never existed) and permission-denied (access explicitly refused).",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "transition-status": {
+      "summary": "Move an issue to a named status, used at every gate (Sec. 4.4, 12.1).",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "issue_key",
+          "target_status"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "issue_key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+            "description": "Jira-style issue key, e.g. PROJ-123."
+          },
+          "target_status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "comment": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "issue_key",
+                  "previous_status",
+                  "new_status",
+                  "transitioned_at"
+                ],
+                "properties": {
+                  "issue_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                    "description": "Jira-style issue key, e.g. PROJ-123."
+                  },
+                  "previous_status": {
+                    "type": "string"
+                  },
+                  "new_status": {
+                    "type": "string"
+                  },
+                  "transitioned_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "The issue is already in the requested status -- no transition performed.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "post-comment": {
+      "summary": "Write the plan, verification report, or a delay/escalation notice back to the issue (Sec. 4.4, 12.1, 14.11).",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "issue_key",
+          "body"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "issue_key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+            "description": "Jira-style issue key, e.g. PROJ-123."
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1
+          },
+          "comment_type": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "verification_report",
+              "escalation",
+              "general"
+            ],
+            "default": "general"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "comment_id",
+                  "issue_key",
+                  "created_at"
+                ],
+                "properties": {
+                  "comment_id": {
+                    "type": "string"
+                  },
+                  "issue_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$",
+                    "description": "Jira-style issue key, e.g. PROJ-123."
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "The comment body was empty after template rendering -- nothing posted.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  }
+}

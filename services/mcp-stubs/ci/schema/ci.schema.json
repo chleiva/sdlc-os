@@ -1,0 +1,393 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sdlc-auto.internal/schemas/mcp/ci/1.0.0",
+  "title": "CI MCP Server -- Tool Contracts",
+  "server": "ci",
+  "version": "1.0.0",
+  "description": "Wraps the organization's existing CI (Sec. 15) rather than re-implementing test execution; feeds Sec. 11.1's verification pipeline.",
+  "tenant_scoping": "per-tenant deployment (touches tenant code/credentials, spec Sec. 14.13)",
+  "contract_shape": "Every tool below follows the same contract shape (spec Sec. 7.6): typed required/optional inputs, a success result shape, a distinct empty result shape, and named error conditions (not-found, permission-denied, rate-limited, upstream-unavailable) that can never be confused with a successful empty result. Every input schema and output schema on this page is JSON Schema 2020-12 (spec Sec. 7.5).",
+  "tools": {
+    "trigger-run": {
+      "summary": "Kick off the organization's existing CI for the affected scope (Sec. 6.4).",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "repository",
+          "ref",
+          "scope"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "The package(s)/service(s) resolved as affected by this change (Sec. 6.4's scope resolution), not the whole repo by default."
+          },
+          "run_type": {
+            "type": "string",
+            "enum": [
+              "test",
+              "security-scan",
+              "build"
+            ],
+            "default": "test"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "run_id",
+                  "status",
+                  "triggered_at"
+                ],
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "const": "queued"
+                  },
+                  "triggered_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "The resolved scope contains no runnable CI jobs for this ref (e.g. a docs-only change) -- no run triggered.",
+            "required": [
+              "outcome",
+              "reason",
+              "resolved_scope"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              },
+              "resolved_scope": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "get-run-status-result": {
+      "summary": "Poll for completion, feeding Sec. 11.1's existing-test-suite and security-scanning layers.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "repository",
+          "run_id"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "run_id",
+                  "status",
+                  "started_at"
+                ],
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "queued",
+                      "running",
+                      "passed",
+                      "failed",
+                      "errored"
+                    ]
+                  },
+                  "started_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "completed_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  },
+                  "results": {
+                    "type": "object",
+                    "properties": {
+                      "tests": {
+                        "type": "object",
+                        "properties": {
+                          "total": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "passed": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "failed": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "security_scan": {
+                        "type": "object",
+                        "properties": {
+                          "findings": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "highest_severity": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "low",
+                              "medium",
+                              "high",
+                              "critical",
+                              null
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "The run completed, but no tests were applicable to the changed scope -- a confirmed empty result set, not a failure.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  }
+}

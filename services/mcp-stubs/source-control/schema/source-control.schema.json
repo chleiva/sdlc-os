@@ -1,0 +1,888 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sdlc-auto.internal/schemas/mcp/source-control/1.0.0",
+  "title": "Source-Control MCP Server -- Tool Contracts",
+  "server": "source-control",
+  "version": "1.0.0",
+  "description": "GitHub App or equivalent first-party App model (spec Sec. 15). Read paths are scoped to the calling run's own branch; write paths operate through the organization's native PR/MR flow, never a parallel review mechanism.",
+  "tenant_scoping": "per-tenant deployment (touches tenant code/credentials, spec Sec. 14.13)",
+  "contract_shape": "Every tool below follows the same contract shape (spec Sec. 7.6): typed required/optional inputs, a success result shape, a distinct empty result shape, and named error conditions (not-found, permission-denied, rate-limited, upstream-unavailable) that can never be confused with a successful empty result. Every input schema and output schema on this page is JSON Schema 2020-12 (spec Sec. 7.5).",
+  "tools": {
+    "create-branch-worktree": {
+      "summary": "Create a branch (and its corresponding worktree checkout) for one agent/session (Sec. 8.1).",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "repository",
+          "base_ref",
+          "branch_name",
+          "session_id"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "branch_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The agent/session this branch is dedicated to -- one branch/worktree per session, never shared (Sec. 8.1)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "branch_name",
+                  "base_ref",
+                  "sha"
+                ],
+                "properties": {
+                  "branch_name": {
+                    "type": "string"
+                  },
+                  "base_ref": {
+                    "type": "string"
+                  },
+                  "sha": {
+                    "type": "string"
+                  },
+                  "worktree_path": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "A branch with this name already exists pointing at the requested base ref -- no new branch created.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "open-pr": {
+      "summary": "Create the PR/MR with a generated description (Sec. 5, Stage 8).",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "repository",
+          "head_branch",
+          "base_branch",
+          "title",
+          "description"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "head_branch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base_branch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "draft": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "pr_number",
+                  "url",
+                  "state"
+                ],
+                "properties": {
+                  "pr_number": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "draft"
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "An open PR already exists for this head/base pair -- no new PR opened.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              },
+              "existing_pr_number": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "get-pr-check-status": {
+      "summary": "Poll PR and CI check status (Sec. 15) without re-implementing test execution.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "repository",
+          "pr_number"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pr_number": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "pr_number",
+                  "state",
+                  "checks",
+                  "mergeable"
+                ],
+                "properties": {
+                  "pr_number": {
+                    "type": "integer"
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "closed",
+                      "merged",
+                      "draft"
+                    ]
+                  },
+                  "mergeable": {
+                    "type": "boolean"
+                  },
+                  "checks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "status"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "queued",
+                            "in_progress",
+                            "completed"
+                          ]
+                        },
+                        "conclusion": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "success",
+                            "failure",
+                            "neutral",
+                            "cancelled",
+                            null
+                          ]
+                        },
+                        "url": {
+                          "type": "string",
+                          "format": "uri"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "The PR exists but no checks have been registered against it yet.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "get-file-contents": {
+      "summary": "Read-only file contents, scoped to the branch the calling run owns.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "repository",
+          "branch",
+          "path"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "branch",
+                  "content",
+                  "encoding",
+                  "size",
+                  "sha"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "branch": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "type": "string",
+                    "enum": [
+                      "utf-8",
+                      "base64"
+                    ]
+                  },
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sha": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "The file exists on this branch but is empty (zero bytes).",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "list-files": {
+      "summary": "Read-only directory listing, scoped to the branch the calling run owns.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "",
+        "required": [
+          "tenant_id",
+          "repository",
+          "branch"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tenant identifier that scopes this request. First-class on every request across every MCP server in this system (spec Sec. 14.13); enforced fail-closed at the server -- a request with no tenant_id, or one the caller's credential is not authorized for, is rejected as permission-denied rather than silently defaulting to any tenant or falling back to a single-tenant assumption."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path_prefix": {
+            "type": "string",
+            "default": ""
+          },
+          "recursive": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "SuccessResult",
+            "description": "",
+            "required": [
+              "outcome",
+              "data"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "ok"
+              },
+              "data": {
+                "type": "object",
+                "required": [
+                  "files"
+                ],
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "path",
+                        "type",
+                        "size"
+                      ],
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "file",
+                            "directory"
+                          ]
+                        },
+                        "size": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "next_cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "EmptyResult",
+            "description": "No files matched the given path prefix on this branch.",
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "empty"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable, caller-safe explanation of why nothing matched. Never null, never absent."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "title": "ErrorResult",
+            "description": "A named, structured error condition. Always carries a non-null 'error' object -- this is what makes it impossible to confuse with EmptyResult, which never carries one.",
+            "required": [
+              "outcome",
+              "error"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "error"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message",
+                  "retryable"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "not-found",
+                      "permission-denied",
+                      "rate-limited",
+                      "upstream-unavailable"
+                    ],
+                    "description": "The four named error conditions every MCP tool contract in this system carries (spec Sec. 7.6)."
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "retryable": {
+                    "type": "boolean",
+                    "description": "True for rate-limited and upstream-unavailable; false for not-found and permission-denied."
+                  },
+                  "retry_after_seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Populated for rate-limited; null otherwise."
+                  },
+                  "details": {
+                    "type": "object",
+                    "description": "Free-form structured context (e.g. which upstream, which quota). Not required."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  }
+}

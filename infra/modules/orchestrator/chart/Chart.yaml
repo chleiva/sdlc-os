@@ -1,0 +1,10 @@
+apiVersion: v2
+name: orchestrator
+description: >-
+  Deployment skeleton for the agent-runtime orchestrator + MCP servers
+  (spec §14.3). The container image is a placeholder until D2 (agent
+  orchestrator core) and F3 (MCP tool contracts) exist — see this
+  directory's README.md.
+type: application
+version: 0.1.0
+appVersion: "phase-0-skeleton"

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: model-serving
+description: >-
+  vLLM + pinned model (spec §13.5) serving chart. Cloud-agnostic — deployed
+  identically regardless of which cloud's gpu-node-pool/network modules
+  provisioned the underlying node.
+type: application
+version: 0.1.0
+appVersion: "phase-0"

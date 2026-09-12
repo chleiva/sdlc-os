@@ -1,0 +1,27 @@
+environment: "dev"
+tenantId: "shared"
+serviceAccountName: "orchestrator"
+modelServingEndpoint: ""
+terminationGracePeriodSeconds: 100
+meshInjectionEnabled: false
+
+image:
+  # PLACEHOLDER — D2 (agent orchestrator core) supplies the real image.
+  # A static "healthz" responder so the smoke run in bootstrap.sh step 5
+  # has something real to probe before D2's build exists; do not point
+  # this at a real orchestrator workload expectation.
+  repository: registry.k8s.io/echoserver
+  tag: "1.10"
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+service:
+  port: 8080
