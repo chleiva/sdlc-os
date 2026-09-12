@@ -274,6 +274,67 @@ def test_secret_argument_is_redacted_even_on_a_blocked_call():
     assert real_secret not in str(record.ctx.arguments)
 
 
+def test_GAP_secret_shaped_text_in_a_plan_artifact_is_not_redacted_anywhere(tmp_path):
+    """DOCUMENTED GAP (found, NOT fixed -- see rationale below): the
+    brief asks to "verify no secret value ever appears in anything
+    durably stored (Registry rows, plan artifacts, progress stores)."
+    The Hook-chain redaction fix above closes that for tool-call
+    arguments passed through `ToolInvoker`/`HookChain`. It does NOT
+    cover free-text fields a model backend writes directly into a
+    `PlanOutput` (subtask descriptions, acceptance-criteria
+    descriptions, interface contracts) -- `plan_artifact.
+    generate_plan_artifact` copies these verbatim into the durable,
+    on-disk plan-artifact JSON with no redaction/scanning pass at all
+    (see `plan_artifact.py`, `PlanArtifactStore.save`).
+
+    This is a REAL, demonstrated gap. NOT patched here because closing
+    it properly means deciding where a redaction pass belongs in a
+    plan-artifact pipeline that has no `ToolInvoker`/`Hook` concept at
+    all (`generate_plan_artifact` is pure data transformation, never a
+    tool call) -- a decision for whoever owns D2/the eventual real
+    `AgentBackend`, not a one-line patch D10 should make unilaterally.
+    Flagged prominently in the final report."""
+    from run_registry import RegistryService
+    from orchestrator.plan_artifact import PlanArtifactStore, generate_plan_artifact
+    from orchestrator.checkpoints import resolve_budget
+    from orchestrator.model_backend import AcceptanceCriterion, PlanOutput, SubTask
+
+    fake_secret = "sk-live-FAKE-SECRET-abc123xyz"
+    plan_output = PlanOutput(
+        outcomes="Add foo.",
+        acceptance_criteria=(AcceptanceCriterion(criterion_id="AC1", description="works", verification_tests=("t",)),),
+        scope_in=("src/foo.py",),
+        scope_out=(),
+        subtasks=(
+            SubTask(
+                task_id="t1",
+                description=f"implement foo using this test credential: {fake_secret}",
+                parallel_group=None,
+            ),
+        ),
+        story_size="S",
+        cross_cutting_or_high_risk=False,
+        risk_tier="low",
+        rollback_strategy="git revert",
+    )
+    budget = resolve_budget(story_size="S", cross_cutting_or_high_risk=False, budgets=__import__("orchestrator.checkpoints", fromlist=["DEFAULT_BUDGETS"]).DEFAULT_BUDGETS)
+    artifact = generate_plan_artifact(
+        run_id="run-secret-leak-test", plan_version=1, plan_output=plan_output, budget=budget, human_plan_text="plan",
+    )
+    store = PlanArtifactStore(tmp_path / "plans")
+    store.save(artifact)
+
+    persisted = (tmp_path / "plans" / "run-secret-leak-test" / "latest.json").read_text()
+    # This assertion documents the CURRENT (gap) behavior -- it is
+    # deliberately an "is present" assertion, not "is absent", so this
+    # test starts failing (loudly, as a signal to fix the real gap) the
+    # moment someone adds a redaction pass to generate_plan_artifact.
+    assert fake_secret in persisted, (
+        "if this fails, a redaction pass was added to generate_plan_artifact -- great! "
+        "update this test to assert the secret is now ABSENT/redacted instead."
+    )
+
+
 def test_secret_argument_is_redacted_on_a_successful_call_with_no_redaction_hook_still_behaves(caplog=None):
     """Regression guard: a HookChain with NO SecretRedactionHook
     registered must behave exactly as before (no crash, arguments

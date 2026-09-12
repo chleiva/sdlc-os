@@ -22,6 +22,8 @@ dependencies = [
     "source-control @ file:../source-control",         # D5
     "tenant-cell @ file:../tenant-cell",               # D6 (control-logic; see report -- no KMS surface exists yet)
     "fleet-dashboard @ file:../fleet-dashboard",       # D8
+    "verification-pipeline @ file:../verification-pipeline",  # D7 (cross-cutting license/CVE-blocking check only)
+    "gates @ file:../gates",                           # D9 (landed mid-pass; see report)
 ]
 
 [project.optional-dependencies]

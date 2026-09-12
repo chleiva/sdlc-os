@@ -59,6 +59,29 @@ class SelfApprovalError(Exception):
     caller can inspect *why* before deciding what to do)."""
 
 
+def _normalized_identity(value: str) -> str:
+    """SECURITY FIX (D10 security-hardening pass, real finding): an
+    adversarial test constructed a genuine self-approval bypass against
+    the unmodified code below. `triggered_by` (captured once, when the
+    gate opens -- `GatesService.open_gate`, caller-supplied) and `actor`
+    (re-resolved independently, at decide-time, via `IdentityResolver
+    .resolve(credential)`) come from two structurally different code
+    paths that need never agree on casing/whitespace for the SAME real
+    human -- e.g. `triggered_by.subject_id="ACC-DEV-1"` vs a later
+    `actor.subject_id="acc-dev-1"`. A plain `==` comparison then judges
+    them as different identities, so rule 1 (self-approval) never
+    fires, while rule 2 (actor == resolved approver) can still pass if
+    the approver record happens to carry the same casing as `actor` --
+    net effect: the same human clears their own gate. Normalizing both
+    sides of every identity comparison in this function (strip + case-
+    fold, applied identically to `subject_id` and `account_id`) closes
+    this without weakening anything: two identities that only differ by
+    case/surrounding whitespace are, for every realistic OIDC-`sub`-style
+    identifier, the same identity, never two legitimately distinct ones.
+    """
+    return value.strip().casefold()
+
+
 def evaluate_gate_clearance(
     *,
     gate_kind: str,
@@ -91,13 +114,13 @@ def evaluate_gate_clearance(
     """
     reasons: list[str] = []
 
-    if actor.subject_id == triggered_by.subject_id:
+    if _normalized_identity(actor.subject_id) == _normalized_identity(triggered_by.subject_id):
         reasons.append(
             "actor is the run's own trigger identity -- self-approval is disallowed by construction "
             "(Sec. 12.1, 17.2), regardless of any other authorization the actor may hold"
         )
 
-    if actor.subject_id != approver.account_id:
+    if _normalized_identity(actor.subject_id) != _normalized_identity(approver.account_id):
         reasons.append(
             f"actor {actor.subject_id!r} is not the gate's resolved authority "
             f"{approver.account_id!r} (source={approver.source!r})"
