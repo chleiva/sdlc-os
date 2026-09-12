@@ -53,7 +53,15 @@ class RegistryService:
         trace_id: str,
         worktree: str | None = None,
     ) -> Result[Run]:
-        if not tenant_id:
+        if not isinstance(tenant_id, str) or not tenant_id:
+            # SECURITY FIX (D10 hardening pass, real finding): a bare
+            # `if not tenant_id` also lets a non-string, truthy value
+            # (e.g. an int from an unvalidated caller) through to
+            # `repository.insert_run`, creating a real row whose
+            # tenant_id is not a string -- inconsistent with every read
+            # path's own `_is_valid_tenant_id` type check (repository.py)
+            # and a latent type-confusion risk if that same tenant_id
+            # value were ever compared against a string one elsewhere.
             return Result.fail(ErrorCode.INVALID_INPUT, "tenant_id is required")
         if not jira_key or not repo or not branch or not trace_id:
             return Result.fail(

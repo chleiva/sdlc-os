@@ -53,6 +53,35 @@ def _reference_dict(r: Reference) -> dict:
     return {"file": r.file, "line": r.line, "column": r.column, "context_snippet": r.context_snippet}
 
 
+def _safe_join(root: Path, path: str) -> Path | None:
+    """Resolve `path` against `root` and confirm the result stays inside
+    `root` -- rejects `..`-traversal and absolute-path escapes.
+
+    SECURITY FIX (D10 security-hardening pass, real finding): `path` is a
+    caller-supplied MCP tool argument (`get_file_module_summary`,
+    `get_ownership_metadata`) and was previously joined to `idx.root` via
+    plain `Path.__truediv__` with no containment check at all. Two
+    concrete escapes were confirmed by an adversarial test:
+      1. `Path(root) / "../other/secret.py"` -- pathlib does not reject
+         `..` segments, so a relative path can walk out of `root`.
+      2. `Path(root) / "/etc/passwd"` -- pathlib's join operator silently
+         *replaces* the whole path when the right-hand side is itself
+         absolute, discarding `root` entirely.
+    Both let a request authenticated for one tenant/repository read a
+    file belonging to a different tenant's repository (or anywhere else
+    readable by this process), entirely bypassing the tenant-scoping
+    choke point in `_resolve_repo` below. Every caller now gets a
+    fail-closed `None` (mapped to the same "not-found" outcome as a
+    genuinely missing file, so a probe cannot distinguish "blocked" from
+    "doesn't exist") instead of the traversed/absolute path.
+    """
+    root_resolved = root.resolve()
+    candidate = (root / path).resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        return None
+    return candidate
+
+
 def _caller_dict(c: CallSite) -> dict:
     return {
         "file": c.file,
@@ -174,8 +203,8 @@ class IndexService:
         def fn():
             idx = self._resolve_repo(args["tenant_id"], args["repository"])
             path = args["path"]
-            full_path = idx.root / path
-            if not full_path.is_file():
+            full_path = _safe_join(idx.root, path)
+            if full_path is None or not full_path.is_file():
                 raise ToolError("not-found", f"'{path}' does not exist in repository '{args['repository']}'.")
             if full_path.stat().st_size == 0:
                 return envelope.empty(f"'{path}' is indexed but empty (zero bytes) -- nothing to summarize.")
@@ -189,7 +218,8 @@ class IndexService:
         def fn():
             idx = self._resolve_repo(args["tenant_id"], args["repository"])
             path = args["path"]
-            if not (idx.root / path).is_file():
+            safe_path = _safe_join(idx.root, path)
+            if safe_path is None or not safe_path.is_file():
                 raise ToolError("not-found", f"'{path}' does not exist in repository '{args['repository']}'.")
             result = idx.ownership(path)
             if result is None:

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gates"
+version = "0.1.0"
+description = "D9: Gates -- Plan-Approval/Change-Review Flow, Autonomy Levels, Escalation (SDLC Auto, Wave 2)"
+requires-python = ">=3.11"
+# `issue-tracker` (D4), `index-server` (D3), `source-control` (D5),
+# `orchestrator` (D2), and `run-registry` (F2) are real, direct
+# dependencies -- installed from their local paths (see README "Setup"),
+# not from a package index, since they are sibling in-repo deliverables.
+# Not listed here for the same reason orchestrator's pyproject.toml
+# omits `run-registry`: a plain `pip install .` would otherwise try (and
+# fail) to resolve them from PyPI.
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gates"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

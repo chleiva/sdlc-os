@@ -17,7 +17,7 @@ proves this for two independently-defined Skills sharing one `ToolInvoker`.
 from __future__ import annotations
 
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable
 
@@ -91,25 +91,54 @@ class HookChain:
     def register(self, hook: Hook) -> None:
         self._hooks.append(hook)
 
+    def _redacted_ctx(self, ctx: ToolCallContext) -> ToolCallContext:
+        """Apply any registered `SecretRedactionHook`'s `.redact()` to a
+        copy of `ctx` for audit-log storage ONLY -- `tool_fn` above still
+        receives the real, unredacted `ctx.arguments` (secrets must still
+        reach the point of use), only the object appended to
+        `self.audit_log` is redacted.
+
+        SECURITY FIX (D10 security-hardening pass, real finding):
+        `SecretRedactionHook` was defined with a working `.redact()`
+        method and its own docstring claimed it "redacts any argument
+        value ... before it is recorded in the audit log" (Section 10.2 /
+        17.2: secrets "redacted everywhere [outside point of use]"), but
+        `dispatch()` never actually called it -- registering the hook had
+        zero effect, and a secret-shaped tool argument (e.g. an api_key/
+        token/password passed to a real tool call) was recorded verbatim
+        in `audit_log`, the one place explicitly meant to be safe to
+        inspect/export. Fixed by invoking `.redact()` here, at record-
+        build time, for every branch that appends to `audit_log`.
+        """
+        redacted_args = ctx.arguments
+        for hook in self._hooks:
+            if isinstance(hook, SecretRedactionHook):
+                redacted_args = hook.redact(redacted_args)
+        if redacted_args is ctx.arguments:
+            return ctx
+        return replace(ctx, arguments=redacted_args)
+
     def dispatch(self, ctx: ToolCallContext, tool_fn: Callable[[dict[str, Any]], Any]) -> Any:
         for hook in self._hooks:
             pre = hook.pre_tool_use(ctx)
             if pre.decision is HookDecision.BLOCK:
-                record = ToolCallRecord(ctx=ctx, blocked_by=type(hook).__name__, reason=pre.reason, result=None)
+                record = ToolCallRecord(
+                    ctx=self._redacted_ctx(ctx), blocked_by=type(hook).__name__, reason=pre.reason, result=None
+                )
                 self.audit_log.append(record)
                 raise HookChainBlockedError(hook_name=type(hook).__name__, reason=pre.reason, ctx=ctx)
 
         try:
             result = tool_fn(ctx.arguments)
         except Exception as exc:
-            record = ToolCallRecord(ctx=ctx, blocked_by=None, reason=None, result=None, error=str(exc))
+            record = ToolCallRecord(ctx=self._redacted_ctx(ctx), blocked_by=None, reason=None, result=None, error=str(exc))
             self.audit_log.append(record)
             raise
 
         for hook in self._hooks:
             hook.post_tool_use(ctx, result)
 
-        record = ToolCallRecord(ctx=ctx, blocked_by=None, reason=None, result=result)
+        record = ToolCallRecord(ctx=self._redacted_ctx(ctx), blocked_by=None, reason=None, result=result)
         self.audit_log.append(record)
         return result
 

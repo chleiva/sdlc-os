@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from source_control import git_ops
+from source_control import git_ops, webhook
 from source_control.audit import AuditLogger
 from source_control.errors import NotFoundError, PermissionDeniedError, SourceControlError
 from source_control.git_ops import BranchAlreadyExists, GitOpsError
@@ -118,6 +118,58 @@ class SourceControlService:
             )
             self._clients[installation.installation_id] = client
         return client
+
+    # ------------------------------------------------------------------
+    # installation-revocation webhook handling
+    #
+    # SECURITY FIX (D10 security-hardening pass, real finding): this
+    # service already had `webhook.verify_signature` (real HMAC check)
+    # and `webhook.is_installation_revocation_event` (recognizes GitHub's
+    # "installation deleted/suspended" events), each unit-tested in
+    # isolation, but *nothing* in this service ever called them -- there
+    # was no code path connecting an incoming revocation webhook to this
+    # service's own cached credentials. Before this fix, a token cached
+    # by `InstallationTokenCache` before revocation but not yet past its
+    # TTL would still be handed to any caller by `get_token()` until the
+    # next live GitHub API call happened to come back 401/403 (the only
+    # place `force_evict` was previously called from,
+    # `github_client._authed_request`). That satisfies "revocation
+    # eventually takes effect" but not Section 17.1's "revocation is
+    # verified end-to-end ... a token revoked in name but still honored
+    # somewhere is a live incident" -- a still-cached, unexpired token is
+    # exactly that gap. This method wires the already-real webhook checks
+    # to proactively evict the cached token (and the cached
+    # `GitHubAppClient`) the moment a verified revocation is observed,
+    # never waiting for the next failed call.
+    # ------------------------------------------------------------------
+    def handle_installation_webhook(
+        self,
+        *,
+        event_type: str,
+        raw_body: bytes,
+        payload: dict,
+        signature_header: str | None,
+        webhook_secret: bytes,
+    ) -> dict:
+        """Verify (fail-closed, real HMAC -- see `webhook.verify_signature`)
+        then, only for a recognized installation-revocation event,
+        proactively evict any cached token/client for that installation_id.
+        Raises `webhook.WebhookVerificationError` on a bad/missing
+        signature, same as D1's Sec. 17.3 gate: rejected before anything
+        else is attempted, never merely logged."""
+        webhook.verify_signature(raw_body, signature_header, webhook_secret)
+
+        if not webhook.is_installation_revocation_event(event_type, payload):
+            return {"outcome": "ignored", "event_type": event_type}
+
+        installation_id = str((payload.get("installation") or {}).get("id", ""))
+        if not installation_id:
+            return {"outcome": "ignored", "reason": "no installation id in payload"}
+
+        client = self._clients.pop(installation_id, None)
+        if client is not None:
+            client.token_cache.force_evict(installation_id)
+        return {"outcome": "revoked", "installation_id": installation_id}
 
     @staticmethod
     def _split_repo(repository: str) -> tuple[str, str]:

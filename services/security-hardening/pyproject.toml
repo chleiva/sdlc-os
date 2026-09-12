@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "security-hardening"
+version = "0.1.0"
+description = "D10: Security / NHI Hardening Pass -- adversarial audit tests against Wave 1's real services (SDLC Auto, Wave 2)"
+requires-python = ">=3.11"
+# Every target this deliverable audits is consumed as a real, editable
+# local dependency -- same pattern D8/D9 used -- so tests import and
+# drive each service's actual code, never a re-implementation of it.
+# `allow-direct-references` (below) is required for all of these
+# `file:../...` local path references, same as job-dispatcher/
+# fleet-dashboard/orchestrator/tenant-cell's own pyproject.toml files.
+dependencies = [
+    "run-registry @ file:../run-registry",            # F2
+    "issue-tracker @ file:../issue-tracker",           # D4 (webhook_signing -- D1's real HMAC dependency)
+    "job-dispatcher @ file:../job-dispatcher",         # D1
+    "orchestrator @ file:../orchestrator",             # D2
+    "index-server @ file:../index-server",             # D3
+    "source-control @ file:../source-control",         # D5
+    "tenant-cell @ file:../tenant-cell",               # D6 (control-logic; see report -- no KMS surface exists yet)
+    "fleet-dashboard @ file:../fleet-dashboard",       # D8
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/security_hardening"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

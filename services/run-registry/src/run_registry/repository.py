@@ -107,8 +107,25 @@ def insert_run(
     )
 
 
+def _is_valid_tenant_id(tenant_id: Any) -> bool:
+    """SECURITY FIX (D10 security-hardening pass, real finding): a type-
+    confusion adversarial test found that `tenant_id=123` (an int, e.g.
+    from a caller that deserialized a JSON payload without validating
+    field types) was NOT caught by the `if not tenant_id` guards below --
+    `123` is truthy -- and was then bound as an INTEGER sqlite3
+    parameter. Because the `tenant_id` column has TEXT affinity, SQLite
+    applies affinity conversion during the comparison and `123` (int)
+    matched a stored tenant "123" (str) row: a wrong-*type* tenant_id
+    was silently treated as if it were the equivalent string tenant_id,
+    breaking the "malformed tenant_id fails closed" guarantee (Sec.
+    14.13/14.14). Every fail-closed check below now also requires
+    `tenant_id` to actually be a `str`.
+    """
+    return isinstance(tenant_id, str) and tenant_id != ""
+
+
 def get_run(cur: sqlite3.Cursor, *, tenant_id: str, run_id: str) -> Run | None:
-    if not tenant_id or not run_id:
+    if not _is_valid_tenant_id(tenant_id) or not run_id:
         return None
     cur.execute(
         "SELECT * FROM runs WHERE id = ? AND tenant_id = ?",
@@ -126,8 +143,8 @@ def list_runs(
     limit: int = 100,
     offset: int = 0,
 ) -> list[Run]:
-    if not tenant_id:
-        # Fail closed: no tenant_id, no query, no rows -- ever.
+    if not _is_valid_tenant_id(tenant_id):
+        # Fail closed: no (valid, string) tenant_id, no query, no rows -- ever.
         return []
     params: list[Any] = [tenant_id]
     sql = "SELECT * FROM runs WHERE tenant_id = ?"
@@ -214,7 +231,7 @@ def count_attempts(cur: sqlite3.Cursor, *, run_id: str, tenant_id: str) -> int:
 
 
 def list_attempts(cur: sqlite3.Cursor, *, run_id: str, tenant_id: str) -> list[Attempt]:
-    if not tenant_id or not run_id:
+    if not _is_valid_tenant_id(tenant_id) or not run_id:
         return []
     cur.execute(
         "SELECT * FROM attempts WHERE run_id = ? AND tenant_id = ? ORDER BY attempt_number ASC",

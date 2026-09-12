@@ -1,0 +1,23 @@
+{
+  "defaults": {
+    "level": "L1"
+  },
+  "repositories": {
+    "acme/app": {
+      "level": "L2",
+      "plan_approval_sla_business_days": 2,
+      "change_review_sla_business_days": 2,
+      "task_classes": {
+        "dependency-bump": {
+          "level": "L3"
+        },
+        "lint-fix": {
+          "level": "L3"
+        }
+      }
+    },
+    "acme/new-service": {
+      "level": "L0"
+    }
+  }
+}
