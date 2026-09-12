@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "observability"
+version = "0.1.0"
+description = "D11: Observability Wiring -- trace/log/metric correlation library + off-node store stand-in (SDLC Auto, Wave 2)"
+requires-python = ">=3.11"
+dependencies = [
+    # Real OpenTelemetry SDK -- installs cleanly in this environment (no
+    # network-dependent exporters used; see README "What's real vs
+    # mocked"). Pinned to one exact version so the trace/span-id
+    # generation semantics this deliverable relies on don't drift.
+    "opentelemetry-api==1.44.0",
+    "opentelemetry-sdk==1.44.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    # Sibling in-repo deliverables this deliverable's OWN tests drive for
+    # real (never touched/modified -- see README and the final agent
+    # report for exactly why each is a dependency here):
+    #   - run-registry (F2): the real RegistryService, for every test
+    #     that needs a real Run/trace_id/checkpoint write.
+    #   - orchestrator (D2): extends its real durable-resume fixture.
+    #   - tenant-cell (D6): extends its real InterruptionWatcher sequence.
+    #   - job-dispatcher (D1): drives its real webhook/queue paths.
+    "run-registry @ file:../run-registry",
+    "orchestrator @ file:../orchestrator",
+    "tenant-cell @ file:../tenant-cell",
+    "job-dispatcher @ file:../job-dispatcher",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/observability"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

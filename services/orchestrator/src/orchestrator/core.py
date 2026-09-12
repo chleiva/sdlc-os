@@ -117,6 +117,7 @@ class Orchestrator:
         packaging_fn: Callable[["Orchestrator", Run, ToolInvoker | None], None] | None = None,
         budgets: dict = DEFAULT_BUDGETS,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        observability: Any | None = None,
     ) -> None:
         self.registry = registry
         self.tenant_id = tenant_id
@@ -129,6 +130,20 @@ class Orchestrator:
         self._packaging_fn = packaging_fn
         self.budgets = budgets
         self._clock = clock
+        # D11 instrumentation (purely additive, defaults to None): an
+        # `observability.ObservabilityClient`-shaped object. When
+        # supplied, `_transition` ships a real agent-level stage-transition
+        # trace event tagged with the run's own F2 `trace_id` (Section
+        # 16.1's shared distributed-tracing key), `_implementation_step`
+        # ships an idempotent per-subtask cost metric (Section 16.1
+        # durable-execution: never re-counted for an already-completed
+        # subtask across a resume), and both `_implementation_step`/
+        # `_verification_step` push every crossed Section 9.3 checkpoint
+        # trigger to the alerting seam (Section 16.4: "alerting, not
+        # babysitting"), not only the one that pauses the run. Every
+        # existing call site that constructs an `Orchestrator` without
+        # this argument is completely unaffected.
+        self.observability = observability
 
     # ------------------------------------------------------------------
     # Registry helpers
@@ -145,7 +160,20 @@ class Orchestrator:
         )
         if not res.is_ok:
             raise OrchestratorError(f"stage transition {run.stage} -> {next_stage} failed: {res.error}")
-        return res.data
+        updated = res.data
+        # D11 instrumentation: ship the agent-level stage-transition trace
+        # event AFTER the write has actually landed in F2's Registry (never
+        # before -- the shipped event's `to_stage` must reflect a real,
+        # durable transition, not an attempted one). See __init__ docstring.
+        if self.observability is not None:
+            self.observability.record_stage_transition(
+                trace_id=updated.trace_id,
+                run_id=updated.id,
+                tenant_id=self.tenant_id,
+                from_stage=run.stage,
+                to_stage=next_stage,
+            )
+        return updated
 
     def _write_checkpoint_pointer(self, run: Run, pointer: str) -> Run:
         res = self.registry.write_checkpoint(
@@ -438,6 +466,25 @@ class Orchestrator:
         progress.lines_changed += diff.lines_changed
         self.progress_store.save(progress)
 
+        # D11 instrumentation: ship an idempotent per-subtask cost metric
+        # (Section 16.1 durable execution, "no double-spend"). Keyed by
+        # `unit_id=subtask["task_id"]` -- the exact same durable identity
+        # `progress.completed_subtask_ids` already uses to make sure a
+        # resumed run never redoes this subtask, so a resume can call this
+        # again with the same subtask id (it never legitimately will, since
+        # `_next_subtask` skips completed ids -- see below) and it would
+        # still be a correctly-deduplicated no-op via
+        # `CostMetricStore.apply`'s idempotency-key check, not merely "in
+        # practice never re-called."
+        if self.observability is not None:
+            self.observability.record_cost_increment(
+                trace_id=run.trace_id,
+                run_id=run.id,
+                tenant_id=self.tenant_id,
+                unit_id=subtask["task_id"],
+                amount_usd=round(diff.lines_changed * 0.01, 6),
+            )
+
         budget = resolve_budget(
             story_size=artifact["risk"]["story_size"],
             cross_cutting_or_high_risk=artifact["risk"]["cross_cutting_or_high_risk"],
@@ -454,6 +501,7 @@ class Orchestrator:
             consecutive_same_stage_failures=progress.consecutive_same_stage_failures,
         )
         triggers = [t for t in triggers if t.signature() not in progress.acknowledged_checkpoint_signatures]
+        self._alert_on_triggers(run, triggers)
         if triggers:
             trigger = triggers[0]
             elicitation = Elicitation(
@@ -470,6 +518,26 @@ class Orchestrator:
             return "paused"
 
         return "continue" if self._next_subtask(artifact, progress) is not None else "verify"
+
+    def _alert_on_triggers(self, run: Run, triggers: list) -> None:
+        """D11 instrumentation (Section 16.4 "alerting, not babysitting"):
+        push every newly-crossed Section 9.3 checkpoint trigger to the
+        alerting seam, not only whichever one becomes the pausing
+        Elicitation (`triggers[0]`) -- a "budget threshold crossed" or
+        "stuck" condition is alert-worthy even on a step where a
+        different trigger kind happens to be the one presented to a
+        human first. A no-op when no observability client is wired in."""
+        if self.observability is None:
+            return
+        for trigger in triggers:
+            self.observability.push_alert(
+                kind=f"checkpoint_{trigger.kind}",
+                message=trigger.reason,
+                run_id=run.id,
+                tenant_id=self.tenant_id,
+                trace_id=run.trace_id,
+                **{k: str(v) for k, v in trigger.details.items()},
+            )
 
     def _verification_step(self, run: Run) -> str:
         result = self.verification_runner.run(run_context=self._run_context(run))
@@ -498,6 +566,7 @@ class Orchestrator:
             consecutive_same_stage_failures=progress.consecutive_same_stage_failures,
         )
         triggers = [t for t in triggers if t.signature() not in progress.acknowledged_checkpoint_signatures]
+        self._alert_on_triggers(run, triggers)
         stuck = next((t for t in triggers if t.kind == "stuck"), None)
         if stuck is not None:
             elicitation = Elicitation(

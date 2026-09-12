@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from issue_tracker.jira_client import JiraClient
 from run_registry import RegistryService
@@ -94,10 +94,21 @@ class JobDispatcher:
         trigger_queue: TenantTriggerQueue[ResolvedTrigger] | None = None,
         branch_for_issue: Callable[[str], str] = default_branch_for_issue,
         trace_id_factory: Callable[[], str] = default_trace_id,
+        observability: Any | None = None,
     ):
         self._secret_lookup = secret_lookup
         self._tenant_directory = tenant_directory
         self._registry = registry
+        # D11 instrumentation (purely additive, defaults to None): an
+        # `observability.ObservabilityClient`-shaped object. When
+        # supplied, `_create_run` and `_queue_and_notify` below each ship
+        # a real, off-node-first trace event for the webhook/queue path
+        # (Section 16.4), tagged with the same `trace_id` this dispatcher
+        # already mints/threads through `RegistryService.create_run` --
+        # the earliest point in the whole System that trace_id exists.
+        # Every existing call site that constructs a `JobDispatcher`
+        # without this argument is completely unaffected.
+        self._observability = observability
         # Each JobDispatcher instance owns its own coordinator/queue by
         # default -- deliberately so: this is what makes the
         # multi-replica shortcut visible/testable (two JobDispatcher
@@ -168,6 +179,16 @@ class JobDispatcher:
         if run_result.outcome != RegistryOutcome.OK:
             raise DispatchError(f"RegistryService.create_run failed: {run_result}")
 
+        if self._observability is not None:
+            self._observability.record_stage_transition(
+                trace_id=run_result.data.trace_id,
+                run_id=run_result.data.id,
+                tenant_id=resolved.tenant_id,
+                from_stage="none",
+                to_stage=run_result.data.stage,
+                source="job_dispatcher_webhook",
+            )
+
         return DispatchResult(
             outcome="run_created",
             tenant_id=resolved.tenant_id,
@@ -185,6 +206,25 @@ class JobDispatcher:
         # stating the delay and the reason." Posted through D4's real,
         # tested `JiraClient.post_comment` -- never silence.
         comment_posted = self._post_delay_comment(resolved, capacity_result)
+
+        if self._observability is not None:
+            # No Run exists yet for a queued trigger (capacity wasn't
+            # available), so there is no F2 trace_id to attach to yet --
+            # this event is tagged by tenant_id/jira_key only, and joins
+            # up with the eventual run-creation event by jira_key once
+            # `retry_next` succeeds.
+            self._observability.sink.emit(
+                kind="log",
+                name="webhook_queued",
+                run_id=None,
+                tenant_id=resolved.tenant_id,
+                attributes={
+                    "jira_key": resolved.jira_key,
+                    "reason": capacity_result.outcome.value,
+                    "queue_depth": depth,
+                    "comment_posted": comment_posted,
+                },
+            )
 
         return DispatchResult(
             outcome="queued",

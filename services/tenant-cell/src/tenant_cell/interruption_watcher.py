@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from run_registry import RegistryService, Run
 
@@ -89,10 +90,30 @@ class InterruptionWatcher:
     `ProvisioningClient` and F2's real `RegistryService`.
     """
 
-    def __init__(self, client: ProvisioningClient, registry: RegistryService, clock: Clock):
+    def __init__(
+        self,
+        client: ProvisioningClient,
+        registry: RegistryService,
+        clock: Clock,
+        *,
+        observability: Any | None = None,
+    ):
         self._client = client
         self._registry = registry
         self._clock = clock
+        # D11 instrumentation (purely additive, defaults to None): an
+        # `observability.ObservabilityClient`-shaped object. When
+        # supplied, step 4 (FLUSHING) and step 5 (CHECKPOINTING) below
+        # each ship a real, off-node-first infra-level trace event tagged
+        # with the run's F2 `trace_id` (the same shared key
+        # `HookChain`/`Orchestrator`'s agent-level events use per Section
+        # 16.1), letting a test (or a real trace viewer) prove the flush
+        # event reached the off-node store strictly before the checkpoint
+        # event did -- see `tests/test_interruption_flush_before_checkpoint_ordering.py`
+        # in the observability package. Every existing call site that
+        # constructs an `InterruptionWatcher` without this argument is
+        # completely unaffected.
+        self._observability = observability
 
     def handle_interruption(
         self,
@@ -106,6 +127,21 @@ class InterruptionWatcher:
     ) -> InterruptionResult:
         started_at = self._clock.now()
         steps: list[StepTiming] = []
+
+        # D11 instrumentation: resolve the run's shared trace_id (F2's
+        # Registry `Run.trace_id`, the same value the orchestrator's
+        # agent-level events are tagged with) once, up front -- a plain
+        # read through the real, tenant-scoped `RegistryService.get_run`,
+        # same discipline as every other registry access in this module.
+        # This lookup is deliberately outside `timed()`: it is metadata
+        # resolution, not one of the five sequence steps being timed, and
+        # a no-op (falls back to `run_id` as its own trace key) whenever
+        # no observability client was supplied.
+        trace_key = run_id
+        if self._observability is not None:
+            existing = self._registry.get_run(tenant_id=tenant_id, run_id=run_id)
+            if existing.is_ok:
+                trace_key = existing.data.trace_id
 
         def timed(step: Step, fn):
             s = self._clock.now()
@@ -135,6 +171,23 @@ class InterruptionWatcher:
         # that got converted to a retry.
         flush_ok = timed(Step.FLUSHING, lambda: self._client.flush_observability(node))
 
+        # D11 instrumentation: ship the "observability flush happened"
+        # infra-level event to the real off-node store THE INSTANT the
+        # flush step completes -- strictly before step 5's checkpoint
+        # write below is even attempted. This is the concrete mechanism
+        # the interruption-safe-flushing acceptance criterion checks:
+        # the sink's own arrival-order/timestamp bookkeeping (not this
+        # process's in-memory state) proves this event landed first.
+        if self._observability is not None:
+            self._observability.record_infra_event(
+                trace_id=trace_key,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                kind="observability_flush",
+                node_id=node.node_id,
+                flush_ok=flush_ok,
+            )
+
         # Step 5: force the checkpoint write via the real RegistryService,
         # before the reclaim lands -- this always runs, even if step 4's
         # flush reported failure, because losing the run's durable
@@ -156,6 +209,22 @@ class InterruptionWatcher:
 
         registry_result = checkpoint_result["result"]
         checkpoint_landed = registry_result is not None and registry_result.is_ok
+
+        # D11 instrumentation: ship the "checkpoint write" infra-level
+        # event immediately after the checkpoint attempt resolves --
+        # always strictly after the flush event shipped above, since this
+        # line cannot execute until `timed(Step.CHECKPOINTING, ...)` above
+        # (which itself runs after the flush step) returns.
+        if self._observability is not None:
+            self._observability.record_infra_event(
+                trace_id=trace_key,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                kind="checkpoint_write",
+                node_id=node.node_id,
+                checkpoint_landed=checkpoint_landed,
+            )
+
         failure_reason = None
         if not checkpoint_landed:
             assert registry_result is not None

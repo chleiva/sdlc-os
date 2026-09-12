@@ -84,9 +84,26 @@ class HookChain:
     BLOCK wins (later hooks are not even consulted, mirroring a real
     guardrail short-circuit)."""
 
-    def __init__(self, hooks: list[Hook] | None = None) -> None:
+    def __init__(
+        self,
+        hooks: list[Hook] | None = None,
+        *,
+        observability: Any | None = None,
+        trace_id: str | None = None,
+    ) -> None:
         self._hooks: list[Hook] = list(hooks or [])
         self.audit_log: list[ToolCallRecord] = []
+        # D11 instrumentation (purely additive, both default to None):
+        # when an `observability.ObservabilityClient`-shaped object and
+        # the owning run's `trace_id` (F2's Registry `Run.trace_id` --
+        # the same shared key threaded through create_run/append_attempt)
+        # are supplied, every dispatch below ships a real, off-node-first
+        # "tool_call" trace event tagged with that trace_id, in addition
+        # to (never instead of) the existing in-memory `audit_log`. Every
+        # existing call site that constructs a `HookChain` with just a
+        # `hooks` list is completely unaffected.
+        self._observability = observability
+        self._trace_id = trace_id
 
     def register(self, hook: Hook) -> None:
         self._hooks.append(hook)
@@ -118,6 +135,23 @@ class HookChain:
             return ctx
         return replace(ctx, arguments=redacted_args)
 
+    def _ship_tool_call_event(self, ctx: ToolCallContext, record: ToolCallRecord) -> None:
+        """D11 instrumentation: off-node-first shipping of one tool-call
+        trace event, in addition to the in-memory `audit_log` append at
+        every call site below. A no-op whenever no observability client
+        (or no trace_id) was supplied -- see `__init__`."""
+        if self._observability is None or self._trace_id is None:
+            return
+        self._observability.record_tool_call(
+            trace_id=self._trace_id,
+            run_id=ctx.run_id,
+            tool_name=ctx.tool_name,
+            stage=ctx.stage,
+            blocked_by=record.blocked_by,
+            error=record.error,
+            invoking_skill=ctx.invoking_skill,
+        )
+
     def dispatch(self, ctx: ToolCallContext, tool_fn: Callable[[dict[str, Any]], Any]) -> Any:
         for hook in self._hooks:
             pre = hook.pre_tool_use(ctx)
@@ -126,6 +160,7 @@ class HookChain:
                     ctx=self._redacted_ctx(ctx), blocked_by=type(hook).__name__, reason=pre.reason, result=None
                 )
                 self.audit_log.append(record)
+                self._ship_tool_call_event(ctx, record)
                 raise HookChainBlockedError(hook_name=type(hook).__name__, reason=pre.reason, ctx=ctx)
 
         try:
@@ -133,6 +168,7 @@ class HookChain:
         except Exception as exc:
             record = ToolCallRecord(ctx=self._redacted_ctx(ctx), blocked_by=None, reason=None, result=None, error=str(exc))
             self.audit_log.append(record)
+            self._ship_tool_call_event(ctx, record)
             raise
 
         for hook in self._hooks:
@@ -140,6 +176,7 @@ class HookChain:
 
         record = ToolCallRecord(ctx=self._redacted_ctx(ctx), blocked_by=None, reason=None, result=result)
         self.audit_log.append(record)
+        self._ship_tool_call_event(ctx, record)
         return result
 
     def on_stop(self, ctx: ToolCallContext | None = None) -> None:
