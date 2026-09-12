@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kms-boundary"
+version = "0.1.0"
+description = "Per-tenant KMS envelope-encryption boundary for SDLC Auto (fills the cross-deliverable gap flagged in CLAUDE.md / D10's security-hardening audit: spec Sec. 17.3's per-tenant secret-decryption boundary)"
+requires-python = ">=3.11"
+dependencies = [
+    # Real AWS SDK -- this package calls actual botocore request/response
+    # shapes for KMS's GenerateDataKey/Decrypt operations, never a
+    # hand-rolled fake client.
+    "boto3>=1.34",
+    # Local envelope-encryption of the payload itself (KMS only ever
+    # wraps/unwraps the small per-secret data key -- see envelope.py's
+    # module docstring for why). Already a dependency of source-control;
+    # reused here rather than a second crypto library.
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    # Test-only dependency, new to this package specifically: moto's KMS
+    # backend lets this package's tests make real boto3 calls (real
+    # request/response shapes, real botocore validation such as the
+    # Encrypt API's 4KB plaintext ceiling and per-key ciphertext binding)
+    # against a mocked KMS server, rather than hand-rolling a fake KMS.
+    # Not used anywhere else in this repo yet -- see README.md's
+    # "Real vs. mocked" section for why it's scoped to this package only.
+    "moto[kms]>=5.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kms_boundary"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

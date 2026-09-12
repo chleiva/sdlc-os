@@ -18,6 +18,11 @@ services/orchestrator/
                          pause/resume via structured elicitation
     model_backend.py     AgentBackend interface (real-model integration
                          seam) + ScriptedAgentBackend (deterministic mock)
+    ollama_backend.py     OllamaAgentBackend: real AgentBackend client for
+                         a self-hosted Ollama instance serving
+                         `ornith-1.5-35b-a3b`, validated against a local
+                         mock Ollama HTTP server (see "OllamaAgentBackend"
+                         below)
     verification.py      VerificationRunner interface (D7 integration
                          seam) + ScriptedVerificationRunner (mock)
     checkpoints.py        Section 9.4 default budgets + Section 9.3
@@ -43,6 +48,9 @@ services/orchestrator/
   tests/                          one pytest module per concern; see the
                          final agent report for the acceptance-criteria
                          -> test-file mapping
+    mock_ollama_server.py         local stdlib HTTP server mimicking
+                         Ollama's native /api/chat response shape, for
+                         test_ollama_backend.py
 ```
 
 ## Setup
@@ -79,3 +87,79 @@ available. See `model_backend.py`'s and `sandbox.py`'s module docstrings
 for exactly what is genuinely enforced/real in this pass versus a
 structural placeholder for D6/infra to back later -- and the final agent
 report for the short version.
+
+## `OllamaAgentBackend`
+
+`ollama_backend.py` is a real `AgentBackend` implementation (see
+`model_backend.py`'s `AgentBackend` interface) that speaks to a
+self-hosted [Ollama](https://ollama.com) instance serving the pinned
+model `ornith-1.5-35b-a3b` (35B total / ~3B active MoE, Q4_K_M, 256K
+context, text+image input) -- a real, already-published Ollama library
+model.
+
+**Endpoint choice.** It calls Ollama's native `/api/chat`, not the
+OpenAI-compatible `/v1/chat/completions` surface Ollama also exposes.
+Both are real supported endpoints; native `/api/chat`'s `format` field
+accepts a full JSON Schema, which Ollama's decoder uses to constrain
+generation so the emitted JSON structurally conforms to the schema
+(required keys, correct types/enums) -- not just "some parseable JSON"
+the way the OpenAI-compatible surface's `response_format: {"type":
+"json_object"}` toggle guarantees. That is the cleaner structured-output
+technique for turning a chat response into the exact `PlanOutput`/
+`DiffOutput` dataclass shape this deliverable needs, at the cost of
+being Ollama-specific rather than a generic OpenAI-compatible client --
+an acceptable trade-off since the pinned model is served by Ollama
+specifically. See the module docstring for the full reasoning.
+
+**What's real:**
+- The HTTP client (stdlib `urllib`, matching
+  `services/source-control/src/source_control/github_client.py`'s
+  idiom -- no new dependency; this package's `pyproject.toml` has no
+  `httpx`/`requests`).
+- Request construction for `author_plan`/`re_plan`/`implement_subtask`:
+  each builds a real chat request (system prompt + a JSON-serialized
+  `run_context`, plus `feedback`/`subtask` where relevant) with a JSON
+  Schema `format` matching `PlanOutput`/`DiffOutput` exactly.
+- Response translation: parsing `message.content` as JSON and mapping it
+  field-for-field into the exact `PlanOutput`/`DiffOutput` (and nested
+  `AcceptanceCriterion`/`SubTask`) dataclass shape, with tuple
+  conversion, not a reimplementation of those dataclasses.
+- Error handling: three distinct, real exception types --
+  `ModelNotReadyError` (connection refused or request timeout, retried
+  with exponential backoff up to a configurable `max_retries` before
+  raising -- the real deployment scales this backend's GPU node to zero
+  when idle, so a cold start is an expected, distinct, caller-retryable
+  condition), `OllamaRequestError` (the endpoint responded with an HTTP
+  error status -- not retried, since retrying an unchanged bad request
+  won't succeed), and `MalformedResponseError` (200 OK but the body
+  wasn't valid JSON, or valid JSON that didn't match the required
+  schema -- real parsing with a specific exception, never best-effort
+  string scraping).
+- Config surface: `OllamaBackendConfig` (a frozen dataclass -- `base_url`,
+  `model`, `timeout_seconds`, `max_retries`, `retry_backoff_seconds`,
+  `temperature`), passed as a plain constructor arg, matching this
+  repo's config idiom elsewhere (e.g.
+  `tenant_cell.model_diversity.TenantCellModelConfig`) rather than
+  reading environment variables inside the class.
+- Tests (`tests/test_ollama_backend.py`) against a local mock Ollama
+  server (`tests/mock_ollama_server.py`, a real stdlib `http.server`
+  mimicking `/api/chat`'s response envelope, same pattern as
+  `services/source-control/tests/mock_github_server.py`): successful
+  `author_plan`/`re_plan`/`implement_subtask` round trips including the
+  JSON-schema-constrained request actually sent, malformed-body and
+  malformed-JSON-content handling, a missing-required-key schema
+  violation, an HTTP-error-status case, a real connection-refused
+  cold-start case (the mock server is stopped mid-test so nothing is
+  listening), a real socket-timeout cold-start case (the mock server
+  delays its response past the configured timeout), and a
+  retry-then-succeed case (a simulated cold start that clears partway
+  through the retry budget).
+
+**What a human still needs to do:** deploy a real Ollama instance
+serving `ornith-1.5-35b-a3b` (pull the model, expose `/api/chat`) and
+point `OllamaBackendConfig.base_url` at it -- this module is real client
+code tested against a mock, not a claim that a live model was actually
+called from this environment; deploying/scaling the Ollama instance
+itself (including the scale-to-zero GPU node behavior `ModelNotReadyError`
+is designed around) is infra's/D6's concern, not something this module
+manages.
