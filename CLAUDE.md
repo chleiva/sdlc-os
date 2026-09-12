@@ -1,9 +1,9 @@
 # SDLC Auto — Repo Guide
 
-This repo is building an open-source, self-hosted, multi-tenant AI
-coding-agent platform ("the System"). It started as specification/planning
-docs only; real implementation is now underway (see Current status) —
-don't assume there's nothing to build/test here anymore.
+This repo implements SDLC Auto, an open-source, self-hosted, multi-tenant
+AI coding-agent platform ("the System"). See `README.md` for what the
+project is and how it's laid out; this file covers conventions for
+anyone — human or AI agent — working in the codebase.
 
 ## What's here
 
@@ -64,7 +64,7 @@ change, and never let two briefs quietly diverge from each other.
   as `\'`, double quotes as `\"`, em dashes are plain `---`
   (unescaped). Match this in any new prose added to it.
 
-## Implementation conventions (established across Wave 0/1)
+## Implementation conventions
 
 - **Stack**: Python for every service unless a deliverable's own nature
   dictates otherwise (F1/D6's IaC is OpenTofu/HCL). Chosen once, applied
@@ -89,12 +89,13 @@ change, and never let two briefs quietly diverge from each other.
   fmt`/`validate`/`plan`) before being treated as landed — a subagent's
   own passing tests are evidence, not proof, since the venv it tested in
   may not be reproducible from a clean install.
-- Every deliverable's own report flags spec ambiguities it had to
-  resolve unilaterally and cross-deliverable contract-drift risk (e.g. a
-  plan-artifact schema built against §9.5 directly because the
-  deliverable that will really emit it hadn't landed yet) — check a new
-  deliverable's report for these before treating it as fully reconciled
-  with what it depends on.
+- When a deliverable has to resolve a spec ambiguity unilaterally, or
+  build against another deliverable's not-yet-landed contract (e.g. a
+  plan-artifact schema built directly from §9.5's spec text because the
+  component that actually emits it hadn't been built yet), it says so
+  explicitly in its own README/docstrings, flagged for reconciliation
+  once the real dependency exists. Check for these before assuming two
+  interdependent components are fully in sync.
 
 ## Known quirks
 
@@ -144,10 +145,10 @@ human decision before this goes anywhere near real tenant data:
 
 ## Current status
 
-Specification: Revision 8, multi-tenant architecture designed in. All
-16 deliverables across all 4 waves are done, each independently
-verified (re-run from a clean venv / `tofu fmt`/`validate`/`plan`, not
-just trusted on the implementing subagent's own say-so) — Wave 0 (F1,
-F2, F3), Wave 1 (D1–D8), Wave 2 (D9–D11), Wave 3 (D12, D13). See "Known
-cross-deliverable gaps" above for what's still open before real
-deployment.
+Specification: Revision 8, multi-tenant architecture designed in. All 16
+deliverables across all 4 waves — Wave 0 (F1, F2, F3), Wave 1 (D1–D8),
+Wave 2 (D9–D11), Wave 3 (D12, D13) — have a real, independently-verified
+implementation under `services/`/`infra/`. See "Known cross-deliverable
+gaps" above for what's still open before a real deployment; see each
+service's own README for what's real versus mocked at its own external
+boundary.
