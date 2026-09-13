@@ -10,11 +10,26 @@ updates:
   # (requirements.txt or pyproject.toml). Sibling in-repo packages
   # (file:../other-service) aren't PyPI releases and Dependabot doesn't
   # touch them; a directory with no manifest is silently skipped.
+  #
+  # Real problem found on this config's first live run: without
+  # `groups`, each (directory, dependency) pair gets its own PR --
+  # across ~15 service directories that's dozens of PRs on the very
+  # first run, each triggering the full CI matrix at once and queueing
+  # every job behind every other (a public repo has unlimited included
+  # Actions minutes, but the account-wide *concurrent job* count is
+  # still capped). `group-by: dependency-name` collapses all directories'
+  # updates for the same dependency into one PR instead of one per
+  # directory, and open-pull-requests-limit caps how many are open at
+  # once regardless.
   - package-ecosystem: "pip"
     directories:
       - "/services/*"
     schedule:
       interval: "weekly"
+    groups:
+      per-dependency:
+        group-by: dependency-name
+    open-pull-requests-limit: 10
 
   # infra/'s own OpenTofu provider version pins.
   - package-ecosystem: "terraform"
@@ -25,9 +40,14 @@ updates:
   # Docker base images used by each service's Dockerfile (only some
   # services have one -- see docker-compose.yml's own top comment for
   # which are actually part of the compose stack; a directory with no
-  # Dockerfile is silently skipped).
+  # Dockerfile is silently skipped). Same grouping rationale as pip
+  # above -- most of these Dockerfiles share the same base image name.
   - package-ecosystem: "docker"
     directories:
       - "/services/*"
     schedule:
       interval: "weekly"
+    groups:
+      per-dependency:
+        group-by: dependency-name
+    open-pull-requests-limit: 10
