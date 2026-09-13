@@ -63,7 +63,7 @@ MIRRORS_DIR = Path(__file__).resolve().parent / "mirrors"
 # already has each service's own dependencies installed (see this
 # directory's README for the exact install sequence), and this just
 # adds each package's real source to sys.path.
-for _pkg in ("orchestrator", "source-control", "run-registry", "verification-pipeline", "issue-tracker", "kms-boundary"):
+for _pkg in ("orchestrator", "source-control", "run-registry", "verification-pipeline", "issue-tracker", "kms-boundary", "gates"):
     sys.path.insert(0, str(REPO_ROOT / "services" / _pkg / "src"))
 
 
@@ -341,14 +341,63 @@ def _build_environment(
     )
 
 
-def drive(env: Environment, status: Any, *, resolve: Resolver) -> RunOutcome:
+def _default_autonomy_level(fallback: str) -> Any:
+    """Real Section 12 autonomy levels (`services/gates.autonomy`),
+    wired into the drive loop below -- previously built and tested by
+    D9 but never actually consulted by the orchestrator's own drive
+    loop (every pause always asked a human, regardless of level). An
+    explicit `AUTONOMY_LEVEL` env var wins for either script; otherwise
+    each entrypoint below passes its own sensible default as `fallback`
+    (`run_once`/`live_run.py`: "L1" -- ask at every gate, a human is
+    right there, unchanged from before this existed; `start_run_async`/
+    `resume_paused_run_async`/`jira_poll_run.py`: "L3" -- an automatic,
+    unattended trigger should not stop for a routine gate, only for a
+    genuine Sec. 9.3 checkpoint anomaly, exactly as Sec. 12's own text
+    already specifies for L3)."""
+    from gates.autonomy import parse_level
+
+    raw = os.environ.get("AUTONOMY_LEVEL", "").strip()
+    return parse_level(raw) if raw else parse_level(fallback)
+
+
+def drive(env: Environment, status: Any, *, resolve: Resolver, autonomy_level: Any | None = None) -> RunOutcome:
     """The one real pause-handling loop, shared by every caller. Calls
     `resolve(status, env)` once per pause: a real decision string keeps
     driving; `None` stops immediately and returns a `paused=True`
     outcome carrying everything (`run_id`, `env.branch_name`,
-    `env.worktree_path`) needed to resume this exact run later."""
+    `env.worktree_path`) needed to resume this exact run later.
+
+    Before calling `resolve` at all for a *gate* pause (never for a
+    checkpoint -- Sec. 12: checkpoints are a safety net orthogonal to
+    the approval-gate cadence, never traded away by any autonomy
+    level), checks `services/gates.autonomy`'s real, already-tested
+    `requires_plan_approval_gate`/`requires_change_review_gate`
+    against the configured level; if the level doesn't require this
+    gate, auto-approves immediately -- no notification, no wait, no
+    question asked. This is the real "only break the glass for a
+    genuine anomaly" behavior."""
+    from gates.autonomy import requires_change_review_gate, requires_plan_approval_gate
+
+    level = autonomy_level if autonomy_level is not None else _default_autonomy_level("L1")
+
     while status.paused:
-        decision = resolve(status, env)
+        auto_decision: str | None = None
+        if status.pause_kind == "gate":
+            if status.stage == "plan_approval_gate":
+                artifact = env.plan_store.load_latest(status.run_id) or {}
+                high_risk = bool(artifact.get("risk", {}).get("cross_cutting_or_high_risk", False))
+                if not requires_plan_approval_gate(level, high_risk=high_risk):
+                    auto_decision = "approve"
+            elif status.stage == "change_review_gate":
+                if not requires_change_review_gate(level, pulled_from_batch=False):
+                    auto_decision = "approve"
+
+        if auto_decision is not None:
+            print(f"[run] Autonomy level {level.value}: {status.stage} not required -- auto-approving, no human asked.")
+            decision = auto_decision
+        else:
+            decision = resolve(status, env)
+
         if decision is None:
             return RunOutcome(exit_code=2, run_id=status.run_id, final_stage=status.stage, paused=True, pause_kind=status.pause_kind)
 
@@ -382,7 +431,7 @@ def run_once(*, task_description: str, real_jira_key: str | None = None) -> RunO
     status = env.orchestrator.start_run(
         jira_key=env.jira_key_field, repo=env.repository, branch=env.branch_name, trace_id=str(uuid.uuid4()),
     )
-    return drive(env, status, resolve=_interactive_resolve)
+    return drive(env, status, resolve=_interactive_resolve, autonomy_level=_default_autonomy_level("L1"))
 
 
 def start_run_async(*, task_description: str, real_jira_key: str, on_pause: Callable[[Any, Environment], None]) -> RunOutcome:
@@ -400,7 +449,7 @@ def start_run_async(*, task_description: str, real_jira_key: str, on_pause: Call
         on_pause(status, env)
         return None
 
-    return drive(env, status, resolve=_async_resolve)
+    return drive(env, status, resolve=_async_resolve, autonomy_level=_default_autonomy_level("L3"))
 
 
 def resume_paused_run_async(
@@ -441,4 +490,4 @@ def resume_paused_run_async(
         on_pause(status, env)
         return None
 
-    return drive(env, status, resolve=_async_resolve)
+    return drive(env, status, resolve=_async_resolve, autonomy_level=_default_autonomy_level("L3"))

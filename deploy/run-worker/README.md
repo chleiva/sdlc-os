@@ -56,11 +56,26 @@ or **`reject`** for a plan/change-review gate; **`continue`** or
 synonyms like `yes`/`lgtm`/`no` also work -- see `jira_poll_run
 ._POSITIVE_WORDS`/`_NEGATIVE_WORDS`). The next `jira_poll_run.py`
 invocation (or the next `--watch` tick) checks every pending story for
-a new reply from a real human (never mistaking its own notification
-comment for one), and resumes that exact run with your decision
-applied via `orchestrator.approve_plan`/`approve_change_review`/
-`resolve_checkpoint` -- which may pause again (another comment,
+a new reply comment (by comment-id ordering, not by author -- a real
+bug found and fixed: your own API token *is* your own Jira account in
+a single-user setup, so filtering out "the bot's own author" also
+filtered out your real replies), and resumes that exact run with your
+decision applied via `orchestrator.approve_plan`/`approve_change_
+review`/`resolve_checkpoint` -- which may pause again (another comment,
 another wait) or finish for real.
+
+## Autonomy levels (Section 12) -- fewer routine questions, still a real safety net
+
+`services/gates.autonomy`'s real L0-L3 levels are now consulted before
+every gate pause (not before a checkpoint -- Sec. 12: checkpoints are
+never traded away by any autonomy level, they're the actual "break the
+glass" mechanism). `jira_poll_run.py` defaults to **L3**: neither the
+plan-approval nor the change-review gate stops for your input at all --
+only a genuine Section 9.3 checkpoint (a size/risk/stuck/time-cost
+anomaly) still does. `live_run.py` defaults to **L1** (ask at every
+gate, unchanged) since a human is already there typing the command.
+Override either with `AUTONOMY_LEVEL=L0|L1|L2|L3` in `.env` or the
+shell environment.
 
 ## What's still a deliberate simplification, stated plainly
 

@@ -27,14 +27,28 @@ comment describing exactly what's needed and how to reply, real-
 assigns the issue to a real person (`JiraClient.assign_issue`), and
 persists enough state (`data/jira_pending_decisions.json`) to resume
 the *same* run later -- then this invocation simply exits. A later poll
-tick (`_check_pending_decisions`) looks for a real reply comment
-(`approve`/`reject` for a gate, `continue`/`stop` for a checkpoint) from
-a real human (never the bot's own comments) and, if found, resumes that
-exact run with the decision applied, via `_run_lib.resume_paused_run_
-async` -- which may pause again (another comment/assignment, another
-wait) or finish for real (PR opened, or abandoned), exactly like the
-first pass would have, just spread across separate invocations instead
-of one blocking process.
+tick (`_check_pending_decisions`) looks for a real new reply comment
+(`approve`/`reject` for a gate, `continue`/`stop` for a checkpoint) --
+identified by comment id ordering, not by comment author (a real bug
+found and fixed: filtering out "the bot's own account" breaks for the
+common single-user setup where your own API token *is* your own Jira
+account, so your reply and the bot's notification share one identity)
+-- and, if found, resumes that exact run with the decision applied, via
+`_run_lib.resume_paused_run_async` -- which may pause again (another
+comment/assignment, another wait) or finish for real (PR opened, or
+abandoned), exactly like the first pass would have, just spread across
+separate invocations instead of one blocking process.
+
+**Real gap this ALSO closes (New): Section 12 autonomy levels are now
+actually consulted.** `services/gates.autonomy` already implements
+L0-L3 (master spec Sec. 12) -- L3 requires neither the plan-approval
+nor the change-review gate, only a genuine Sec. 9.3 checkpoint anomaly
+still pauses -- but nothing in the orchestrator's own drive loop ever
+checked it; every pause always asked a human regardless of level. This
+script now defaults to L3 (an automatic, unattended trigger should not
+stop for a routine gate); `live_run.py` still defaults to L1 (ask at
+every gate -- a human is right there). Override either with the
+`AUTONOMY_LEVEL` env var. See `_run_lib.drive`'s own docstring.
 
 Usage:
     cd deploy/run-worker
@@ -224,9 +238,23 @@ def _finish_issue(jira_client: Any, config: Any, issue_key: str, outcome: RunOut
 def _check_pending_decisions() -> None:
     """For every story already picked up and currently paused awaiting a
     human decision: look for a real new reply comment matching the
-    narrow approve/reject/continue/stop vocabulary, from a real human
-    (never the bot's own notification comments), and resume that exact
-    run if one is found."""
+    narrow approve/reject/continue/stop vocabulary, and resume that
+    exact run if one is found.
+
+    Real bug this closes: an earlier version also required the new
+    comment's author to differ from the bot's own account, meant to
+    ignore the bot's own notification comment. That breaks for exactly
+    the common single-user setup this tool is built for: your own API
+    token *is* your own Jira account, so your reply and the bot's
+    notification share one identity, and the filter silently excluded
+    your real "approve" reply as if it were the bot's own noise.
+    Comment-id ordering (only look past `last_seen_comment_id`, set to
+    the id of the bot's own notification right after it's posted) is
+    sufficient on its own: the *next* comment chronologically can only
+    be a reply, and the narrow exact-word vocabulary (`_match_decision`
+    requires the *entire* comment body to equal one word) means the
+    bot's own multi-sentence notification could never accidentally
+    match it anyway, even without an author check."""
     from _run_lib import resume_paused_run_async
 
     pending = _load_pending()
@@ -245,20 +273,17 @@ def _check_pending_decisions() -> None:
             continue
 
         last_seen = int(record["last_seen_comment_id"]) if record.get("last_seen_comment_id") else -1
-        new_from_humans = [
-            c for c in comments_result["data"]["comments"]
-            if int(c["comment_id"]) > last_seen and c["author_account_id"] != bot_account_id
-        ]
-        if not new_from_humans:
+        new_comments = [c for c in comments_result["data"]["comments"] if int(c["comment_id"]) > last_seen]
+        if not new_comments:
             continue
 
         decision: str | None = None
-        for c in reversed(new_from_humans):  # most recent reply wins
+        for c in reversed(new_comments):  # most recent reply wins
             decision = _match_decision(c["body"], record["pause_kind"])
             if decision is not None:
                 break
         if decision is None:
-            print(f"[jira_poll] {issue_key}: new repl{'y' if len(new_from_humans) == 1 else 'ies'} found, but none matched approve/reject/continue/stop.")
+            print(f"[jira_poll] {issue_key}: new repl{'y' if len(new_comments) == 1 else 'ies'} found, but none matched approve/reject/continue/stop.")
             continue
 
         print(f"[jira_poll] {issue_key}: real decision {decision!r} found -- resuming run {record['run_id']!r}.")
