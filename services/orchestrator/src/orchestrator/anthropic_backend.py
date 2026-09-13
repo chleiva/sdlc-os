@@ -87,6 +87,21 @@ _MESSAGES_PATH = "/v1/messages"
 _PLAN_TOOL_NAME = "emit_plan"
 _DIFF_TOOL_NAME = "emit_diff"
 
+# Real live-run bug this closes (see tool_use_bedrock_backend.py's module
+# docstring, and ollama_backend.PLAN_OUTPUT_SCHEMA's _SUBTASK_SCHEMA):
+# a plan authored a subtask literally titled "Run tests to verify greet
+# function works correctly" -- the implementation agent has no tool that
+# runs a test suite or shell command, so every attempt at that subtask
+# burned its whole tool-calling turn budget unable to make progress.
+_SUBTASK_CONSTRAINT = (
+    "Every subtask must be a concrete code-authoring action (create, "
+    "modify, or delete specific real files) -- never a subtask to run, "
+    "execute, or verify tests, since that happens automatically, for "
+    "real, in a separate stage after every subtask here is implemented."
+)
+_PLAN_TOOL_DESCRIPTION = f"Emit the structured plan for this run. {_SUBTASK_CONSTRAINT}"
+_RE_PLAN_TOOL_DESCRIPTION = f"Emit the structured, revised plan for this run. {_SUBTASK_CONSTRAINT}"
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -282,7 +297,7 @@ class AnthropicAgentBackend(AgentBackend):
         response = self._call_tool(
             user=user_prompt,
             tool_name=_PLAN_TOOL_NAME,
-            tool_description="Emit the structured plan for this run.",
+            tool_description=_PLAN_TOOL_DESCRIPTION,
             schema=PLAN_OUTPUT_SCHEMA,
         )
         return _plan_from_dict(response)
@@ -298,7 +313,7 @@ class AnthropicAgentBackend(AgentBackend):
         response = self._call_tool(
             user=user_prompt,
             tool_name=_PLAN_TOOL_NAME,
-            tool_description="Emit the structured, revised plan for this run.",
+            tool_description=_RE_PLAN_TOOL_DESCRIPTION,
             schema=PLAN_OUTPUT_SCHEMA,
         )
         return _plan_from_dict(response)

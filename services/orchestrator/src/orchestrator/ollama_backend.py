@@ -144,7 +144,31 @@ _SUBTASK_SCHEMA = {
     "type": "object",
     "properties": {
         "task_id": {"type": "string"},
-        "description": {"type": "string"},
+        "description": {
+            "type": "string",
+            # Real live-run bug this closes (see tool_use_bedrock_backend.py's
+            # module docstring): a plan authored a subtask literally titled
+            # "Run tests to verify greet function works correctly". The
+            # implementation agent has no tool that runs a test suite or a
+            # shell command (only read_file/write_file/list_files/finish) --
+            # every retry against that subtask spent its whole tool-calling
+            # turn budget unable to make progress and never called finish,
+            # eventually raising BedrockAgenticLoopExhaustedError. This
+            # schema-level description is shared by every vendor backend
+            # (Anthropic/OpenAI/Bedrock/Ollama all import PLAN_OUTPUT_SCHEMA
+            # from this module), so fixing it here constrains plan authoring
+            # for all of them at once, not just one vendor.
+            "description": (
+                "A single, concrete code-authoring action: create, modify, "
+                "or delete specific real files. Never a subtask to run, "
+                "execute, or verify tests, or to 'validate'/'confirm' the "
+                "change works -- verification runs automatically, for "
+                "real, against the actual files this run has touched, in "
+                "a separate stage once every subtask here is implemented. "
+                "The agent carrying out this subtask has no tool to "
+                "execute a test suite or any shell command."
+            ),
+        },
         "parallel_group": {"type": ["string", "null"]},
         "depends_on": {"type": "array", "items": {"type": "string"}},
         "interface_contract": {"type": ["string", "null"]},
@@ -196,7 +220,11 @@ DIFF_OUTPUT_SCHEMA = {
 _PLAN_SYSTEM_PROMPT = (
     "You are the planning stage of an autonomous coding agent. Respond "
     "with ONLY a single JSON object matching the required schema -- no "
-    "prose, no markdown fences, no commentary before or after the JSON."
+    "prose, no markdown fences, no commentary before or after the JSON. "
+    "Every subtask must be a concrete code-authoring action (create, "
+    "modify, or delete specific real files) -- never a subtask to run, "
+    "execute, or verify tests, since that happens automatically, for "
+    "real, in a separate stage after every subtask here is implemented."
 )
 
 _IMPLEMENT_SYSTEM_PROMPT = (

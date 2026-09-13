@@ -147,7 +147,11 @@ _IMPLEMENT_TOOL_DESCRIPTION = (
 _PLAN_SYSTEM_PROMPT = (
     "You are the planning stage of an autonomous coding agent. Produce "
     "your plan ONLY by calling the provided tool with a fully-populated "
-    "input object -- never as free-text prose."
+    "input object -- never as free-text prose. Every subtask must be a "
+    "concrete code-authoring action (create, modify, or delete specific "
+    "real files) -- never a subtask to run, execute, or verify tests, "
+    "since that happens automatically, for real, in a separate stage "
+    "after every subtask here is implemented."
 )
 _IMPLEMENT_SYSTEM_PROMPT = (
     "You are the implementation stage of an autonomous coding agent, "

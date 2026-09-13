@@ -48,6 +48,24 @@ not done in this pass (those vendors' native tool-calling APIs are
 directly analogous; this class's loop-and-tool-execution logic is not
 Bedrock-specific in shape, only `_converse_with_tools`'s request/response
 translation is).
+
+**Real live-run bug found and fixed during this pass's third live run**:
+the deliberate absence of a `run_command`/test-running tool (above) has
+a real consequence a live run actually hit -- a plan authored a subtask
+literally titled "Run tests to verify greet function works correctly".
+This agent has no way to fulfill that (only read/write/list files), so
+every one of its 20 tool-calling turns went by unable to make progress
+and it never called `finish`, raising
+`BedrockAgenticLoopExhaustedError`. The fix is not a new tool here (that
+would duplicate D7's real verification pipeline inside the
+implementation loop); it's upstream, in the shared plan-authoring schema
+and every vendor backend's plan system prompt (`ollama_backend
+._SUBTASK_SCHEMA`'s `description` field, `bedrock_backend
+._PLAN_SYSTEM_PROMPT`, `openai_backend._PLAN_SYSTEM_PROMPT`,
+`anthropic_backend._SUBTASK_CONSTRAINT`): a subtask must be a concrete
+code-authoring action, never a "run/verify tests" step, since
+verification already happens automatically, for real, in the separate
+stage `core.py` runs next.
 """
 
 from __future__ import annotations

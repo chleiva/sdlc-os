@@ -216,7 +216,11 @@ def _response_format_for(schema: dict, *, name: str) -> dict:
 _PLAN_SYSTEM_PROMPT = (
     "You are the planning stage of an autonomous coding agent. Respond "
     "with ONLY a single JSON object matching the required schema -- no "
-    "prose, no markdown fences, no commentary before or after the JSON."
+    "prose, no markdown fences, no commentary before or after the JSON. "
+    "Every subtask must be a concrete code-authoring action (create, "
+    "modify, or delete specific real files) -- never a subtask to run, "
+    "execute, or verify tests, since that happens automatically, for "
+    "real, in a separate stage after every subtask here is implemented."
 )
 
 _IMPLEMENT_SYSTEM_PROMPT = (
