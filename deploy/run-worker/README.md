@@ -141,12 +141,16 @@ app registration):
    sufficient; a real opt-in signal is always required too — see
    `gating.py`).
 3. Generate a real API token: https://id.atlassian.com/manage-profile/security/api-tokens
-4. Fill in the repo root's `.env`'s `JIRA_*` block:
+4. Fill in the repo root's `.env`'s `JIRA_*` block — all four status
+   names are your team's own real workflow, never invented by this
+   System (Sec. 4.4/19); rename any of them to match:
    ```
    JIRA_BASE_URL=https://your-site.atlassian.net
    JIRA_PROJECT_KEY=PROJ
-   JIRA_TRIGGER_STATUS=Selected for Development
+   JIRA_TRIGGER_STATUS=Selected for Development   # "pick me" -- e.g. your "Ready"
    JIRA_OPT_IN_LABEL=ai-factory
+   JIRA_APPROVAL_STATUS=In Progress               # where it moves once picked up
+   JIRA_DONE_STATUS=Done                          # where it moves on real success
    JIRA_AUTH_MODE=basic
    JIRA_BASIC_AUTH_EMAIL=you@example.com
    JIRA_BASIC_AUTH_API_TOKEN=<the token from step 3>
@@ -156,6 +160,15 @@ app registration):
    .venv/bin/python jira_poll_run.py            # poll once, run at most one new story, exit
    .venv/bin/python jira_poll_run.py --watch 60 # poll every 60s until Ctrl-C
    ```
+
+The story's real Jira status moves as work actually happens: found in
+`JIRA_TRIGGER_STATUS` → real `transition_status` call to
+`JIRA_APPROVAL_STATUS` the moment it's picked up (with a comment) →
+real `transition_status` to `JIRA_DONE_STATUS` (with the PR link in a
+comment) only on genuine successful completion. An abandoned run (a
+gate rejected, or a checkpoint wasn't cleared) deliberately stays in
+`JIRA_APPROVAL_STATUS` with an explanatory comment instead — it still
+needs a human, not a silent "Done".
 
 Already-processed issue keys are tracked in `data/jira_processed.json`
 (gitignored) so re-polling never re-triggers the same story — delete

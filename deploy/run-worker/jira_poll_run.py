@@ -80,6 +80,7 @@ def _build_jira_client():
         trigger_status=require_env("JIRA_TRIGGER_STATUS"),
         approval_status=os.environ.get("JIRA_APPROVAL_STATUS", "In Progress"),
         change_review_status=os.environ.get("JIRA_CHANGE_REVIEW_STATUS", "In Review"),
+        done_status=os.environ.get("JIRA_DONE_STATUS", "Done"),
     )
     return JiraClient(config=config), config
 
@@ -124,27 +125,48 @@ def _poll_once() -> bool:
             print(f"[jira_poll] {decision.reason}")
             continue
 
-        # Real opt-in match -- this is the one story to run.
+        # Real opt-in match -- this is the one story to run. Move it
+        # through its real Jira lifecycle as work actually happens
+        # (New): trigger_status ("Ready", "Selected for Development",
+        # whatever the team calls "pick me") -> approval_status ("In
+        # Progress" -- a human/board picks the exact name via
+        # JIRA_APPROVAL_STATUS) the moment this picks it up, and, only
+        # on a genuine successful completion, -> done_status ("Done",
+        # JIRA_DONE_STATUS). An abandoned run (a gate rejected, or a
+        # checkpoint wasn't cleared) deliberately does NOT move to
+        # done_status -- it stays in approval_status, needing a human,
+        # with a comment explaining why.
         summary = data["summary"]
         description = data.get("description") or ""
         task_description = f"{summary}\n\n{description}".strip()
-        print(f"[jira_poll] {issue_key} is opted in (matched {decision.matched_label or decision.matched_issue_type!r}). Starting a real run ...")
+        print(f"[jira_poll] {issue_key} is opted in (matched {decision.matched_label or decision.matched_issue_type!r}).")
+
+        pickup = jira_client.transition_status(
+            issue_key=issue_key, target_status=config.approval_status,
+            comment="SDLC Auto picked up this story and is starting a real run.",
+        )
+        if pickup.get("outcome") not in ("ok", "empty"):
+            print(f"[jira_poll] Note: transitioning {issue_key} to {config.approval_status!r} did not succeed: {pickup}")
+        print(f"[jira_poll] Starting a real run for {issue_key} ...")
 
         outcome = run_once(task_description=task_description, real_jira_key=issue_key)
         _mark_processed(issue_key)
 
-        # Real touch: report the outcome back to the actual Jira issue,
-        # via the same real JiraClient.post_comment this deliverable
-        # already has -- not just a local console message.
-        if outcome.pr_url:
-            comment = f"SDLC Auto opened a real pull request for this story: {outcome.pr_url}"
-        elif outcome.exit_code == 0:
-            comment = f"SDLC Auto ran this story to completion (final stage: {outcome.final_stage}), but no PR URL was recorded."
+        if outcome.exit_code == 0:
+            comment = (
+                f"SDLC Auto opened a real pull request for this story: {outcome.pr_url}"
+                if outcome.pr_url
+                else f"SDLC Auto ran this story to completion (final stage: {outcome.final_stage}), but no PR URL was recorded."
+            )
+            done = jira_client.transition_status(issue_key=issue_key, target_status=config.done_status, comment=comment)
+            if done.get("outcome") not in ("ok", "empty"):
+                print(f"[jira_poll] Note: transitioning {issue_key} to {config.done_status!r} did not succeed: {done}; posting the outcome as a plain comment instead.")
+                jira_client.post_comment(issue_key=issue_key, body=comment, comment_type="general")
         else:
-            comment = f"SDLC Auto started a run for this story but it was abandoned at stage {outcome.final_stage!r} (exit code {outcome.exit_code})."
-        post_result = jira_client.post_comment(issue_key=issue_key, body=comment, comment_type="general")
-        if post_result.get("outcome") != "ok":
-            print(f"[jira_poll] Note: posting the outcome comment back to {issue_key} did not succeed: {post_result}")
+            comment = f"SDLC Auto started a run for this story but it was abandoned at stage {outcome.final_stage!r} (exit code {outcome.exit_code}). Still needs a human look -- left in {config.approval_status!r}, not moved to {config.done_status!r}."
+            post_result = jira_client.post_comment(issue_key=issue_key, body=comment, comment_type="general")
+            if post_result.get("outcome") != "ok":
+                print(f"[jira_poll] Note: posting the outcome comment back to {issue_key} did not succeed: {post_result}")
 
         return True  # one story per invocation, matching live_run.py's single-task shape
 

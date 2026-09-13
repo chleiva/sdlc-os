@@ -52,6 +52,16 @@ class TenantJiraConfig:
     approval_status: str = "In Progress"
     change_review_status: str = "In Review"
 
+    # (New) Completion status: where a story lands once its run
+    # finishes successfully (a real PR opened, or the run otherwise
+    # reached a clean terminal stage) -- the fourth real, org-specific
+    # name in this same "never invent a status" family as
+    # `trigger_status`/`approval_status`/`change_review_status` above.
+    # Deliberately NOT applied automatically on an abandoned/rejected
+    # run (a human gate declined it, or a checkpoint was not cleared) --
+    # only on a genuine successful completion; see `jira_poll_run.py`.
+    done_status: str = "Done"
+
     # Sizing field strategy: "label" (default; portable, needs no Jira
     # admin custom-field setup) writes/reads size as a `size:S|M|L|XL`
     # label. "customfield" reads/writes a real Jira custom field (story
@@ -77,7 +87,7 @@ class TenantJiraConfig:
         own board workflow and is only ever the Automation rule's
         *trigger*, never our own action.
         """
-        return frozenset({self.approval_status, self.change_review_status})
+        return frozenset({self.approval_status, self.change_review_status, self.done_status})
 
     def size_label(self, size: str) -> str:
         return f"size:{size}"

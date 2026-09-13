@@ -38,7 +38,7 @@ def test_disallowed_target_status_is_refused_without_contacting_jira(jira_client
     assert store.get(key).status == status_before
 
 
-@pytest.mark.parametrize("allowed_status", ["In Progress", "In Review"])
+@pytest.mark.parametrize("allowed_status", ["In Progress", "In Review", "Done"])
 def test_configured_gate_statuses_are_allowed(jira_client, allowed_status):
     epic = jira_client.create_epic(
         project_key="PROJ", summary=f"Allowed epic {allowed_status}", description="d", acceptance_criteria=["ac"],
@@ -54,5 +54,8 @@ def test_configured_gate_statuses_are_allowed(jira_client, allowed_status):
     assert result["data"]["new_status"] == allowed_status
 
 
-def test_allowed_target_statuses_is_exactly_the_two_gate_statuses(tenant_config):
-    assert tenant_config.allowed_target_statuses() == {"In Progress", "In Review"}
+def test_allowed_target_statuses_is_exactly_the_gate_and_done_statuses(tenant_config):
+    # (New) done_status joins the allowlist alongside the two gate
+    # statuses -- a real story completion is now also a real, allowed
+    # transition, not just a comment describing one.
+    assert tenant_config.allowed_target_statuses() == {"In Progress", "In Review", "Done"}
