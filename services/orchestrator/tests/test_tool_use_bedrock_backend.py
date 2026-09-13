@@ -18,9 +18,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ReadTimeoutError
 
 from orchestrator.checkpoints import DEFAULT_BUDGETS
-from orchestrator.bedrock_backend import BedrockBackendConfig
+from orchestrator.bedrock_backend import BedrockBackendConfig, BedrockThrottledError
 from orchestrator.model_backend import SubTask
 from orchestrator.tool_use_bedrock_backend import (
     BedrockAgenticLoopExhaustedError,
@@ -82,6 +83,53 @@ def test_read_then_write_then_finish_is_a_real_multi_turn_loop(backend, fake_cli
     assert diff.files_touched == ("README.md",)
     assert (git_fixture_repo / "README.md").read_text() == "# fixture\nupdated\n"
     assert len(fake_client.call_log) == 3  # read, write, finish -- three real converse calls
+
+
+def test_a_transient_read_timeout_is_retried_then_the_turn_succeeds(fake_client, git_fixture_repo):
+    """Real live-run bug this closes: `_converse_with_tools` used to
+    hit the real boto3 client directly with no retry at all, so a
+    single transient `ReadTimeoutError` (a real `botocore.exceptions
+    .BotoCoreError` subclass -- hit for real on a live run generating a
+    large file) crashed the entire run outright. It must now retry via
+    `call_converse_with_retry` (the same real logic
+    `BedrockAgentBackend._converse`, the planning call, already had) and
+    succeed once the transient condition clears -- proven here with a
+    tiny real backoff so the test itself stays fast."""
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1", max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockToolUseAgentBackend(config, fake_client, workspace_root=git_fixture_repo)
+
+    fake_client.queue_response(ReadTimeoutError(endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com/model/fake/converse"))
+    fake_client.queue_response(converse_response_with_tool_call("write_file", {"path": "hello.py", "content": "x = 1\n"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add hello.py", "summary": "added"}))
+
+    diff = backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="add hello.py", parallel_group=None, depends_on=()),
+    )
+
+    assert diff.files_touched == ("hello.py",)
+    assert (git_fixture_repo / "hello.py").read_text() == "x = 1\n"
+    assert len(fake_client.call_log) == 3  # 1 failed attempt (retried) + write + finish
+
+
+def test_persistent_connection_errors_exhaust_retries_and_raise_bedrock_throttled_error(fake_client, git_fixture_repo):
+    """A connection error that never clears must surface as
+    `BedrockThrottledError` (retryable-but-exhausted, matching
+    `BedrockAgentBackend`'s own classification) -- not silently accepted,
+    and not the old bare `BedrockInvocationError` a zero-retry call
+    would have produced."""
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1", max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockToolUseAgentBackend(config, fake_client, workspace_root=git_fixture_repo)
+
+    for _ in range(2):
+        fake_client.queue_response(ReadTimeoutError(endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com/model/fake/converse"))
+
+    with pytest.raises(BedrockThrottledError):
+        backend.implement_subtask(
+            run_context={"run_id": "r1", "story_size": "S"},
+            subtask=SubTask(task_id="t1", description="add hello.py", parallel_group=None, depends_on=()),
+        )
+    assert len(fake_client.call_log) == 2  # both retry attempts consumed, then gave up
 
 
 def test_never_calling_finish_raises_within_the_derived_turn_budget(fake_client, git_fixture_repo):

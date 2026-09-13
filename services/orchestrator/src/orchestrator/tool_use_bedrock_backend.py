@@ -82,6 +82,7 @@ from orchestrator.bedrock_backend import (
     BedrockInvocationError,
     BedrockMalformedOutputError,
     BedrockThrottledError,
+    call_converse_with_retry,
 )
 from orchestrator.checkpoints import DEFAULT_BUDGETS
 from orchestrator.model_backend import AgentBackend, DiffOutput, PlanOutput, SubTask
@@ -419,14 +420,24 @@ class BedrockToolUseAgentBackend(AgentBackend):
     # -- Converse plumbing (auto tool choice, multiple real tools) ---------
 
     def _converse_with_tools(self, messages: list[dict]) -> dict:
+        """Real live-run bug this closes: this call used to hit the real
+        `boto3` client directly with no retry at all -- a single
+        transient `ReadTimeoutError` (a real `BotoCoreError` subclass,
+        hit for real generating a large file) crashed the whole run
+        outright. `call_converse_with_retry` is the exact same retry-
+        with-backoff logic `BedrockAgentBackend._converse` (the planning
+        call) already had and was already tested -- shared here so both
+        real Converse call sites are equally resilient to the same real
+        failure modes, not just one of them."""
+        request_kwargs = {
+            "modelId": self._config.model_id,
+            "system": [{"text": _SYSTEM_PROMPT}],
+            "messages": messages,
+            "inferenceConfig": {"maxTokens": self._config.max_tokens, "temperature": self._config.temperature},
+            "toolConfig": {"tools": _TOOL_SPECS, "toolChoice": {"auto": {}}},
+        }
         try:
-            return self._client.converse(
-                modelId=self._config.model_id,
-                system=[{"text": _SYSTEM_PROMPT}],
-                messages=messages,
-                inferenceConfig={"maxTokens": self._config.max_tokens, "temperature": self._config.temperature},
-                toolConfig={"tools": _TOOL_SPECS, "toolChoice": {"auto": {}}},
-            )
+            return call_converse_with_retry(client=self._client, request_kwargs=request_kwargs, config=self._config)
         except (BedrockThrottledError, BedrockAccessDeniedError, BedrockInvocationError, BedrockMalformedOutputError):
             raise
         except Exception as exc:  # pragma: no cover - defensive: surface any other real boto3/ClientError as-is

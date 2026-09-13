@@ -263,8 +263,17 @@ class BedrockBackendConfig:
 
     model_id: str
     region_name: str = "us-east-1"
-    max_tokens: int = 4096
-    timeout_seconds: float = 60.0
+    # Real live-run finding: 4096 output tokens is tight for a single
+    # large-file generation (e.g. one HTML+CSS+JS file implementing a
+    # full game) -- raised to 8192, still bounded, not unlimited.
+    max_tokens: int = 8192
+    # Real live-run finding: a real Bedrock read timeout (60s, the old
+    # default) genuinely happens on a large/slow generation -- this
+    # alone isn't the resilience fix (retrying matters far more, see
+    # `call_converse_with_retry`), but a too-short timeout means even
+    # the FIRST attempt of a legitimately-slow-but-healthy call gets
+    # needlessly counted as a failure. Raised to 180s.
+    timeout_seconds: float = 180.0
     max_retries: int = 3
     retry_backoff_seconds: float = 1.0
     temperature: float = 0.0
@@ -342,6 +351,155 @@ def _diff_from_tool_input(d: dict) -> DiffOutput:
         raise
     except (TypeError, KeyError, AttributeError, ValueError) as e:
         raise BedrockMalformedOutputError(f"diff tool-call input did not match DiffOutput shape: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Shared retry-with-backoff plumbing -- real live-run bug this closes: the
+# retry loop below originally lived only as a method on `BedrockAgentBackend`
+# (this class's single-forced-tool-call `_converse`). `tool_use_bedrock_backend
+# .BedrockToolUseAgentBackend`'s multi-turn `_converse_with_tools` -- the one
+# that actually drives a real implementation loop -- called `self._client
+# .converse(...)` directly with NO retry at all, so a single transient
+# `ReadTimeoutError` (hit for real on a live run generating a large file)
+# crashed the entire run outright instead of retrying. Extracted here as a
+# free function so both call sites share identical resilience against the
+# exact same real Bedrock failure modes, rather than one having it and the
+# other not.
+# ---------------------------------------------------------------------------
+
+
+def _call_with_soft_timeout(client: Any, request_kwargs: dict, *, timeout_seconds: float) -> dict:
+    """Enforce `timeout_seconds` at this module's level, since the
+    injected `boto3` client is already fully constructed by the caller
+    and this module has no way to retroactively change its underlying
+    HTTP timeout. A single-worker executor is used purely as a stdlib-
+    only timeout mechanism, not for concurrency.
+
+    Deliberately *not* `with ThreadPoolExecutor(...) as pool: ...`: the
+    context manager's `__exit__` calls `shutdown(wait=True)`, which
+    would block until the slow/hung call actually finishes -- defeating
+    the point of a soft timeout for a call that never returns in time.
+    `shutdown(wait=False)` here lets this function return/raise as soon
+    as `future.result(timeout=...)` does, while the abandoned background
+    thread (if any) finishes or is eventually reclaimed on its own."""
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(client.converse, **request_kwargs)
+        return future.result(timeout=timeout_seconds)
+    finally:
+        pool.shutdown(wait=False)
+
+
+def call_converse_with_retry(*, client: Any, request_kwargs: dict, config: "BedrockBackendConfig") -> dict:
+    """Call `bedrock-runtime`'s real `converse` operation, retrying with
+    exponential backoff on a soft timeout, Bedrock's own throttling/
+    transient error codes, or a connection-level `BotoCoreError`
+    (including `ReadTimeoutError`/`ConnectTimeoutError` -- both real
+    `BotoCoreError` subclasses, so this same branch covers exactly the
+    failure this docstring's module-level comment describes). Never
+    retries an access-denied code (retrying with the same credentials
+    changes nothing) or any other `ClientError` (a defect in the request
+    itself, not a transient condition). Returns the raw Converse API
+    response dict -- callers extract whatever shape they need from it
+    (a single forced tool call's input, or a multi-turn tool-use
+    message)."""
+    response: dict | None = None
+    last_transient_summary: str | None = None
+
+    for attempt in range(config.max_retries):
+        try:
+            response = _call_with_soft_timeout(client, request_kwargs, timeout_seconds=config.timeout_seconds)
+        except concurrent.futures.TimeoutError as e:
+            last_transient_summary = f"call timed out after {config.timeout_seconds}s"
+            if attempt < config.max_retries - 1:
+                logger.warning(
+                    "Bedrock converse call to model %r timed out (attempt %d/%d); retrying",
+                    config.model_id,
+                    attempt + 1,
+                    config.max_retries,
+                )
+                time.sleep(config.retry_backoff_seconds * (2**attempt))
+                continue
+            raise BedrockThrottledError(
+                f"Bedrock converse call to model {config.model_id!r} in region "
+                f"{config.region_name!r} did not complete after "
+                f"{config.max_retries} attempt(s): {last_transient_summary}"
+            ) from e
+        except ClientError as e:
+            error = e.response.get("Error", {}) if hasattr(e, "response") else {}
+            code = error.get("Code", "")
+            message = error.get("Message", "")
+            http_status_code = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") if hasattr(e, "response") else None
+
+            if code in _ACCESS_DENIED_ERROR_CODES:
+                # Never retried, and the message carries only the error
+                # code/model id/region -- no credential material ever
+                # passes through this module (see `BedrockAccessDeniedError`'s
+                # docstring).
+                raise BedrockAccessDeniedError(
+                    f"Bedrock denied access for model {config.model_id!r} in region "
+                    f"{config.region_name!r}: {code}: {message}"
+                ) from e
+
+            if code in _THROTTLING_ERROR_CODES:
+                last_transient_summary = f"{code}: {message}"
+                if attempt < config.max_retries - 1:
+                    logger.warning(
+                        "Bedrock converse call to model %r hit %s (attempt %d/%d); retrying",
+                        config.model_id,
+                        code,
+                        attempt + 1,
+                        config.max_retries,
+                    )
+                    time.sleep(config.retry_backoff_seconds * (2**attempt))
+                    continue
+                raise BedrockThrottledError(
+                    f"Bedrock converse call to model {config.model_id!r} in region "
+                    f"{config.region_name!r} did not succeed after "
+                    f"{config.max_retries} attempt(s): {last_transient_summary}"
+                ) from e
+
+            # Any other ClientError (ValidationException,
+            # ResourceNotFoundException, ModelErrorException, ...): a
+            # problem with this specific request, not retried.
+            raise BedrockInvocationError(
+                f"Bedrock converse call to model {config.model_id!r} in region "
+                f"{config.region_name!r} failed: {code}: {message}",
+                error_code=code,
+                http_status_code=http_status_code,
+            ) from e
+        except BotoCoreError as e:
+            # Connection-level failure (endpoint unreachable, connect/
+            # read timeout inside botocore itself) -- treated the same
+            # as a throttling code: retryable, never a defect in the
+            # request. The exception's own string form is botocore's,
+            # not ours; it never includes credential material either
+            # (endpoint URL and a generic message only).
+            last_transient_summary = str(e)
+            if attempt < config.max_retries - 1:
+                logger.warning(
+                    "Bedrock converse call to model %r hit a connection error (attempt %d/%d); retrying",
+                    config.model_id,
+                    attempt + 1,
+                    config.max_retries,
+                )
+                time.sleep(config.retry_backoff_seconds * (2**attempt))
+                continue
+            raise BedrockThrottledError(
+                f"Bedrock converse call to model {config.model_id!r} in region "
+                f"{config.region_name!r} did not succeed after "
+                f"{config.max_retries} attempt(s): connection error: {last_transient_summary}"
+            ) from e
+        else:
+            break
+    else:  # pragma: no cover - loop always returns/raises above
+        raise BedrockThrottledError(
+            f"Bedrock converse call to model {config.model_id!r} did not succeed: "
+            f"{last_transient_summary}"
+        )
+
+    assert response is not None  # for type-checkers; unreachable otherwise
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -430,9 +588,11 @@ class BedrockAgentBackend(AgentBackend):
     def _converse(self, *, system: str, user: str, tool_name: str, tool_description: str, schema: dict) -> dict:
         """Call `converse` with a `toolConfig` that forces a single named
         tool call, retrying on transient error codes/connection failures/
-        soft timeout, then extract and return that tool call's `input`
-        object (still unvalidated JSON at this point -- callers run it
-        through `_plan_from_tool_input`/`_diff_from_tool_input`)."""
+        soft timeout (`call_converse_with_retry`, shared with
+        `tool_use_bedrock_backend.py`'s multi-turn loop), then extract
+        and return that tool call's `input` object (still unvalidated
+        JSON at this point -- callers run it through
+        `_plan_from_tool_input`/`_diff_from_tool_input`)."""
         request_kwargs = {
             "modelId": self._config.model_id,
             "system": [{"text": system}],
@@ -454,126 +614,8 @@ class BedrockAgentBackend(AgentBackend):
                 "toolChoice": {"tool": {"name": tool_name}},
             },
         }
-
-        response: dict | None = None
-        last_transient_summary: str | None = None
-
-        for attempt in range(self._config.max_retries):
-            try:
-                response = self._call_with_soft_timeout(request_kwargs)
-            except concurrent.futures.TimeoutError as e:
-                last_transient_summary = f"call timed out after {self._config.timeout_seconds}s"
-                if attempt < self._config.max_retries - 1:
-                    logger.warning(
-                        "Bedrock converse call to model %r timed out (attempt %d/%d); retrying",
-                        self._config.model_id,
-                        attempt + 1,
-                        self._config.max_retries,
-                    )
-                    time.sleep(self._config.retry_backoff_seconds * (2**attempt))
-                    continue
-                raise BedrockThrottledError(
-                    f"Bedrock converse call to model {self._config.model_id!r} in region "
-                    f"{self._config.region_name!r} did not complete after "
-                    f"{self._config.max_retries} attempt(s): {last_transient_summary}"
-                ) from e
-            except ClientError as e:
-                error = e.response.get("Error", {}) if hasattr(e, "response") else {}
-                code = error.get("Code", "")
-                message = error.get("Message", "")
-                http_status_code = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") if hasattr(e, "response") else None
-
-                if code in _ACCESS_DENIED_ERROR_CODES:
-                    # Never retried, and the message carries only the
-                    # error code/model id/region -- no credential
-                    # material ever passes through this module (see
-                    # `BedrockAccessDeniedError`'s docstring).
-                    raise BedrockAccessDeniedError(
-                        f"Bedrock denied access for model {self._config.model_id!r} in region "
-                        f"{self._config.region_name!r}: {code}: {message}"
-                    ) from e
-
-                if code in _THROTTLING_ERROR_CODES:
-                    last_transient_summary = f"{code}: {message}"
-                    if attempt < self._config.max_retries - 1:
-                        logger.warning(
-                            "Bedrock converse call to model %r hit %s (attempt %d/%d); retrying",
-                            self._config.model_id,
-                            code,
-                            attempt + 1,
-                            self._config.max_retries,
-                        )
-                        time.sleep(self._config.retry_backoff_seconds * (2**attempt))
-                        continue
-                    raise BedrockThrottledError(
-                        f"Bedrock converse call to model {self._config.model_id!r} in region "
-                        f"{self._config.region_name!r} did not succeed after "
-                        f"{self._config.max_retries} attempt(s): {last_transient_summary}"
-                    ) from e
-
-                # Any other ClientError (ValidationException,
-                # ResourceNotFoundException, ModelErrorException, ...):
-                # a problem with this specific request, not retried.
-                raise BedrockInvocationError(
-                    f"Bedrock converse call to model {self._config.model_id!r} in region "
-                    f"{self._config.region_name!r} failed: {code}: {message}",
-                    error_code=code,
-                    http_status_code=http_status_code,
-                ) from e
-            except BotoCoreError as e:
-                # Connection-level failure (endpoint unreachable, connect/
-                # read timeout inside botocore itself) -- treated the same
-                # as a throttling code: retryable, never a defect in the
-                # request. The exception's own string form is botocore's,
-                # not ours; it never includes credential material either
-                # (endpoint URL and a generic message only).
-                last_transient_summary = str(e)
-                if attempt < self._config.max_retries - 1:
-                    logger.warning(
-                        "Bedrock converse call to model %r hit a connection error (attempt %d/%d); retrying",
-                        self._config.model_id,
-                        attempt + 1,
-                        self._config.max_retries,
-                    )
-                    time.sleep(self._config.retry_backoff_seconds * (2**attempt))
-                    continue
-                raise BedrockThrottledError(
-                    f"Bedrock converse call to model {self._config.model_id!r} in region "
-                    f"{self._config.region_name!r} did not succeed after "
-                    f"{self._config.max_retries} attempt(s): connection error: {last_transient_summary}"
-                ) from e
-            else:
-                break
-        else:  # pragma: no cover - loop always returns/raises above
-            raise BedrockThrottledError(
-                f"Bedrock converse call to model {self._config.model_id!r} did not succeed: "
-                f"{last_transient_summary}"
-            )
-
-        assert response is not None  # for type-checkers; unreachable otherwise
+        response = call_converse_with_retry(client=self._client, request_kwargs=request_kwargs, config=self._config)
         return self._extract_tool_input(response, tool_name=tool_name)
-
-    def _call_with_soft_timeout(self, request_kwargs: dict) -> dict:
-        """Enforce `timeout_seconds` at this module's level, since the
-        injected `boto3` client is already fully constructed by the
-        caller and this module has no way to retroactively change its
-        underlying HTTP timeout. A single-worker executor is used purely
-        as a stdlib-only timeout mechanism, not for concurrency.
-
-        Deliberately *not* `with ThreadPoolExecutor(...) as pool: ...`:
-        the context manager's `__exit__` calls `shutdown(wait=True)`,
-        which would block until the slow/hung call actually finishes --
-        defeating the point of a soft timeout for a call that never
-        returns in time. `shutdown(wait=False)` here lets this method
-        return/raise as soon as `future.result(timeout=...)` does, while
-        the abandoned background thread (if any) finishes or is
-        eventually reclaimed on its own."""
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            future = pool.submit(self._client.converse, **request_kwargs)
-            return future.result(timeout=self._config.timeout_seconds)
-        finally:
-            pool.shutdown(wait=False)
 
     def _extract_tool_input(self, response: dict, *, tool_name: str) -> dict:
         try:
