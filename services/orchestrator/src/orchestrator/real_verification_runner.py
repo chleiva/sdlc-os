@@ -131,6 +131,30 @@ class RealVerificationRunner(VerificationRunner):
 
         return ["."]
 
+    @staticmethod
+    def _pytest_target_paths(scope_paths: list[str]) -> list[str]:
+        """Real bug this closes -- the true root cause behind a whole
+        night's worth of "stuck" checkpoints on a real live run: a
+        typical `pytest.ini`'s own `python_files = test_*.py` setting
+        means pytest treats an *explicit* positional argument that
+        doesn't match that pattern as a hard "not found" error, not a
+        silent skip (unlike ruff/mypy, which tolerate a non-Python path
+        in their own scope just fine). `scope_paths` legitimately
+        includes non-Python files `files_touched` picked up -- a config
+        file a fix-up subtask wrote (`mypy.ini`/`ruff.toml`/
+        `pytest.ini`), the actual HTML/JS deliverable itself -- none of
+        which were ever valid pytest *targets*, only real `.py` files
+        are. Passing the full, unfiltered scope straight to pytest (as
+        this method used to) meant every one of those non-.py files
+        showed up as a fabricated "not found" collection error, driving
+        a real "stuck" checkpoint over and over regardless of whether
+        the actual Python test file was fine. Falls back to `["."]`
+        (pytest's own real directory-tree discovery, honoring
+        `pytest.ini`'s own `testpaths`) if nothing in scope is a real
+        `.py` file at all, rather than handing pytest zero targets."""
+        py_paths = [p for p in scope_paths if p.endswith(".py")]
+        return py_paths or ["."]
+
     def _pipeline_for(self, run_id: str) -> tuple[VerificationPipeline, list[str]]:
         pipeline = self._pipelines.get(run_id)
         artifact = self._plan_store.load_latest(run_id)
@@ -147,7 +171,7 @@ class RealVerificationRunner(VerificationRunner):
         pipeline, scope_paths = self._pipeline_for(run_context["run_id"])
         existing_tests_result = run_existing_test_suite_layer(
             repo_root=self._workspace_root,
-            scope_paths=scope_paths,
+            scope_paths=self._pytest_target_paths(scope_paths),
         )
         static_analysis_result = run_static_analysis_layer(
             paths=scope_paths,

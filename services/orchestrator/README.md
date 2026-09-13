@@ -96,6 +96,13 @@ python3 -m venv .venv
 index -- it is a real, direct dependency (this deliverable imports and
 drives its actual `RegistryService`, never a reimplementation of it).
 
+`real_verification_runner.py`/`tests/test_real_verification_runner.py`
+additionally need `verification-pipeline` (D7) installed the same way
+(`.venv/bin/pip install -e ../verification-pipeline`) -- a real,
+direct dependency this package's own `pyproject.toml` doesn't declare
+(a flagged, pre-existing gap, same category as the boto3 note above);
+the rest of the test suite doesn't need it.
+
 ## Running the tests
 
 ```bash
