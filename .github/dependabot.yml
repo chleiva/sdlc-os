@@ -31,11 +31,25 @@ updates:
         group-by: dependency-name
     open-pull-requests-limit: 10
 
-  # infra/'s own OpenTofu provider version pins.
+  # infra/'s own OpenTofu provider version pins. Real problem found on
+  # this config's first live run: `directory: "/infra"` errored with
+  # "No files found in /infra" -- the terraform ecosystem only looks
+  # for .tf files directly inside the given directory (non-recursive),
+  # and infra/ itself has none at its own top level; every real module
+  # lives one or two levels down (infra/modules/<name>[/<cloud>],
+  # infra/environments/<name>). Fixed with explicit globs for each real
+  # depth instead of guessing a recursive pattern would work.
   - package-ecosystem: "terraform"
-    directory: "/infra"
+    directories:
+      - "/infra/environments/*"
+      - "/infra/modules/*"
+      - "/infra/modules/*/*"
     schedule:
       interval: "weekly"
+    groups:
+      per-dependency:
+        group-by: dependency-name
+    open-pull-requests-limit: 10
 
   # Docker base images used by each service's Dockerfile (only some
   # services have one -- see docker-compose.yml's own top comment for
