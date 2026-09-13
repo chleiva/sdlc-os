@@ -151,6 +151,27 @@ def test_post_comment_success(jira_client):
     assert "comment_id" in result["data"]
 
 
+def test_post_comment_never_sends_a_properties_field(jira_client, jira_mock):
+    """Real live-run bug this guards against: `POST .../comment` with a
+    `properties` array genuinely gets a 400 from real Jira Cloud
+    ("The JSON data provided for the property is not a valid JSON"),
+    reproduced against a real site regardless of `comment_type`'s value.
+    `comment_type` is accepted for the caller's own bookkeeping but must
+    never be sent to Jira via `properties` again -- the mock rejects
+    `properties` the same way real Jira does (see mock's own comment),
+    so a regression here fails a test, not just a live run."""
+    _base_url, store = jira_mock
+    epic = jira_client.create_epic(
+        project_key="PROJ", summary="No-properties test epic", description="d", acceptance_criteria=["ac"],
+    )
+    key = epic["data"]["issue_key"]
+
+    result = jira_client.post_comment(issue_key=key, body="a real comment", comment_type="general")
+    assert result["outcome"] == "ok"
+    stored_comment = store.get(key).comments[-1]
+    assert "properties" not in stored_comment
+
+
 def test_post_comment_with_blank_body_is_empty_result(jira_client):
     epic = jira_client.create_epic(
         project_key="PROJ", summary="Blank comment epic", description="d", acceptance_criteria=["ac"],

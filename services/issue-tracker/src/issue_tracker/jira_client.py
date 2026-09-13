@@ -325,6 +325,20 @@ class JiraClient:
     # -- post-comment ---------------------------------------------------
 
     def post_comment(self, *, issue_key: str, body: str, comment_type: str = "general") -> dict[str, Any]:
+        """`comment_type` is accepted for callers' own bookkeeping (and
+        was previously round-tripped to Jira as a comment `properties`
+        entry) but is no longer sent to Jira at all -- a real live-run
+        bug found and fixed: Jira Cloud's `POST .../comment` genuinely
+        rejects a `properties` array on this endpoint (HTTP 400,
+        "The JSON data provided for the property is not a valid JSON",
+        reproduced against a real Jira Cloud site regardless of the
+        value's shape). Real per-comment properties, if ever needed for
+        real, are a *separate* real endpoint
+        (`PUT /rest/api/3/comment/{commentId}/properties/{propertyKey}`,
+        one call per property, after creation) -- not implemented here
+        since nothing in this codebase ever reads `comment_type` back;
+        it was write-only metadata that had never actually been
+        exercised against a real Jira account until this bug surfaced."""
         try:
             if adf.is_empty_adf_or_text(body):
                 return Result.empty("Comment body was empty after template rendering; nothing posted.").to_wire()
@@ -332,9 +346,7 @@ class JiraClient:
             resp = self._request(
                 "POST",
                 f"/rest/api/3/issue/{issue_key}/comment",
-                json_body={"body": adf.text_to_adf(body), "properties": [
-                    {"key": "sdlc-auto.comment_type", "value": comment_type},
-                ]},
+                json_body={"body": adf.text_to_adf(body)},
             )
             posted = resp.json()
             return Result.ok({

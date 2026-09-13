@@ -316,6 +316,16 @@ def make_handler(store: JiraMockStore):
                 self._send(404, {"errorMessages": [f"Issue does not exist: {key}"]})
                 return
             body = _read_json(self)
+            if "properties" in body:
+                # Real Jira Cloud behavior (found against a real site,
+                # not documented anywhere that says so): POST .../comment
+                # genuinely rejects a `properties` array with a 400,
+                # regardless of its value's shape -- reproduced here so a
+                # regression (re-adding `properties` to
+                # JiraClient.post_comment) fails a test instead of only a
+                # live run, which is how this was found the first time.
+                self._send(400, {"errorMessages": ["The JSON data provided for the property is not a valid JSON."]})
+                return
             comment_id = store.next_comment_id()
             comment = {
                 "id": comment_id,
