@@ -234,6 +234,11 @@ def make_handler(store: JiraMockStore):
             issue_type = extract("issuetype")
             summary = extract("summary")
             parent_key = extract("parent")
+            # (New) status = "..." -- the polling-based trigger path's
+            # own query shape (JiraClient.find_stories_in_status), a
+            # sibling of the pre-existing idempotency-check query above,
+            # not a replacement for it.
+            status = extract("status")
 
             matches = []
             for issue in store.all():
@@ -244,6 +249,8 @@ def make_handler(store: JiraMockStore):
                 if summary and issue.summary != summary:
                     continue
                 if parent_key and issue.parent_key != parent_key:
+                    continue
+                if status and issue.status != status:
                     continue
                 matches.append({"key": issue.key, "fields": {"summary": issue.summary}})
             self._send(200, {"issues": matches, "nextPageToken": None})

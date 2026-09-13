@@ -1,10 +1,17 @@
-# deploy/run-worker — the real live-run tool
+# deploy/run-worker — the real live-run tools
 
 This is the missing orchestrator process entrypoint (CLAUDE.md's "Known
-cross-deliverable gaps"), built as a manual tool for a first real live
-run rather than a Docker Compose service (job-dispatcher/Jira are
-deliberately not wired to it yet — see `live_run.py`'s own docstring for
-the staged plan this fits into).
+cross-deliverable gaps"), built as a pair of manual tools rather than a
+Docker Compose service:
+
+- **`live_run.py`** — the task description is a CLI argument you type.
+- **`jira_poll_run.py`** — the task description is a real story pulled
+  from a real Jira Cloud site (polling, not a push webhook — see its
+  own docstring for exactly why, and what the real production path
+  looks like instead).
+
+Both share the exact same real orchestrator wiring, factored into
+`_run_lib.py`'s `run_once()` so the two never silently drift apart.
 
 ## What this actually does, for real
 
@@ -22,19 +29,33 @@ the staged plan this fits into).
    module's own docstring for exactly which, and why).
 4. A real terminal-based approval gate at both Section 9 human gates.
 5. A real `git push` + a real PR via `SourceControlService.open_pr`.
+6. (`jira_poll_run.py` only) A real `JiraClient.find_stories_in_status`
+   JQL search, a real `gating.evaluate` opt-in check (never "in the
+   trigger status" alone — master spec Sec. 4.4), and a real
+   `post_comment` back to the Jira issue reporting the outcome (PR URL,
+   or why the run was abandoned).
 
 ## What's still a deliberate simplification, stated plainly
 
 - **No real `GatesService` integration yet.** `GatesService.open_gate`
   needs a real Jira issue to resolve an approver from
-  (`resolve_default_approver`) — this script's terminal prompt is a
-  stand-in until Jira is wired (this repo's staged plan's next step).
+  (`resolve_default_approver`) — both scripts' terminal prompt is a
+  stand-in, even `jira_poll_run.py` (which has a real issue key
+  available but doesn't yet wire it through to `GatesService`).
 - **Task description is carried in `jira_key`.** `core.py`'s
   `_run_context` has no dedicated free-text task-description field
-  today — in the real system this would come from the Jira ticket body.
-  This is a real, disclosed gap to close properly (give `Run`/`_run_context`
-  an actual task-description field) once Jira triggers real runs instead
-  of this manual tool.
+  today. `jira_poll_run.py` at least keeps the *real* issue key
+  inspectable (`run.jira_key` reads `"PROJ-123: <task text>"`, not pure
+  prose) — `_run_lib.run_once`'s own docstring explains why. Giving
+  `Run`/`_run_context` an actual dedicated task-description field is
+  still a real, disclosed gap, not fixed by this.
+- **Polling, not a push webhook.** See `jira_poll_run.py`'s own
+  docstring for the full reasoning: the real production path (Jira
+  Automation → signed webhook relay → `job-dispatcher` →
+  orchestrator) needs a real OAuth app, a publicly-reachable relay, and
+  `job-dispatcher` actually calling the orchestrator (it doesn't,
+  anywhere in this codebase, today) — polling proves the same "real
+  story in, real PR out" loop without first standing up all of that.
 - **`research_fn`/index-server are not wired.** The RESEARCH stage is a
   no-op in this pass — the model plans/implements from the task
   description and its own tool-driven exploration of the worktree
@@ -85,7 +106,7 @@ VENV="$(pwd)/.venv"
 "$VENV/bin/pip" install "pytest>=8.0"
 ```
 
-## Run it
+## Run it — `live_run.py` (task typed on the command line)
 
 Fill in the repo root's `.env` first (`GITHUB_APP_ID`,
 `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`,
@@ -100,7 +121,51 @@ function that returns f'Hello, {name}!', and a matching test in test_hello.py"
 
 Optional env vars this tool alone reads (not part of the Docker Compose
 `.env.example` surface): `LIVE_RUN_REPOSITORY` (default
-`chleiva/returnby`), `LIVE_RUN_TENANT_ID` (default `live-run-tenant`).
+`chleiva/returnby`), `LIVE_RUN_TENANT_ID` (default `live-run-tenant`),
+`BEDROCK_MAX_TURNS` (overrides `BedrockToolUseAgentBackend`'s per-subtask
+turn cap, which otherwise derives from the plan's own story size — see
+that class's docstring).
+
+## Run it — `jira_poll_run.py` (task pulled from a real Jira story)
+
+Everything `live_run.py` needs above, plus real Jira Cloud access. The
+**simplest real setup** (basic auth — an API token, not a full OAuth
+app registration):
+
+1. In your Jira Cloud site: **Project settings → Workflow**, confirm a
+   status meaning "queued and ready to start" exists (Jira's own
+   default, `Selected for Development`, is fine — don't invent a new
+   one). Note the exact project key (e.g. `PROJ`).
+2. Apply a label to the story you want picked up — default
+   `ai-factory` (Sec. 4.4: never "in the trigger status" alone is
+   sufficient; a real opt-in signal is always required too — see
+   `gating.py`).
+3. Generate a real API token: https://id.atlassian.com/manage-profile/security/api-tokens
+4. Fill in the repo root's `.env`'s `JIRA_*` block:
+   ```
+   JIRA_BASE_URL=https://your-site.atlassian.net
+   JIRA_PROJECT_KEY=PROJ
+   JIRA_TRIGGER_STATUS=Selected for Development
+   JIRA_OPT_IN_LABEL=ai-factory
+   JIRA_AUTH_MODE=basic
+   JIRA_BASIC_AUTH_EMAIL=you@example.com
+   JIRA_BASIC_AUTH_API_TOKEN=<the token from step 3>
+   ```
+5. Create a story in that project, in that status, with that label.
+6. ```bash
+   .venv/bin/python jira_poll_run.py            # poll once, run at most one new story, exit
+   .venv/bin/python jira_poll_run.py --watch 60 # poll every 60s until Ctrl-C
+   ```
+
+Already-processed issue keys are tracked in `data/jira_processed.json`
+(gitignored) so re-polling never re-triggers the same story — delete
+that file (or the whole `data/` directory) for a clean slate.
+
+(`JIRA_OAUTH_BEARER_TOKEN` + `JIRA_AUTH_MODE=oauth_bearer` is also
+supported, matching Sec. 17.1's preferred non-human-identity model, but
+needs a real OAuth 2.0 (3LO) app registration first — see
+`services/issue-tracker/SETUP.md` step 1. Basic auth is the pragmatic
+default for a first real test.)
 
 Real state (Registry DB, plan/progress stores, git mirror clones) is
 kept under `data/` and `mirrors/` in this directory — gitignored, safe

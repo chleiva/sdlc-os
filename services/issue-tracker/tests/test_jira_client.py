@@ -162,6 +162,29 @@ def test_post_comment_with_blank_body_is_empty_result(jira_client):
     assert "empty" in result["reason"]
 
 
+def test_find_stories_in_status_returns_matching_candidates(jira_client):
+    """The polling-based trigger path's own query (New): every issue
+    created here starts in the mock's default status ("Selected for
+    Development", matching the fixture's `TenantJiraConfig.trigger_status`)
+    -- a real search for that status must find it, and must NOT find an
+    issue explicitly transitioned away from it."""
+    findable = jira_client.create_epic(
+        project_key="PROJ", summary="Findable via status search", description="d", acceptance_criteria=["ac"],
+    )
+    findable_key = findable["data"]["issue_key"]
+
+    moved = jira_client.create_epic(
+        project_key="PROJ", summary="Not findable -- already moved on", description="d", acceptance_criteria=["ac"],
+    )
+    moved_key = moved["data"]["issue_key"]
+    jira_client.transition_status(issue_key=moved_key, target_status="In Progress")
+
+    result = jira_client.find_stories_in_status(project_key="PROJ", status="Selected for Development")
+    assert result["outcome"] == "ok"
+    assert findable_key in result["data"]["issue_keys"]
+    assert moved_key not in result["data"]["issue_keys"]
+
+
 def test_rate_limited_response_is_named_error_with_retry_after(jira_client, jira_mock):
     """Forces the mock to answer 429 (as a real Jira Cloud rate-limit
     response would) via the mock's test-only `X-Force-Status` hook."""

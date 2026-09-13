@@ -345,6 +345,37 @@ class JiraClient:
         except IssueTrackerError as exc:
             return self._error_result(exc)
 
+    # -- find-stories-in-status (New: the polling-based trigger path) ------
+
+    def find_stories_in_status(self, *, project_key: str, status: str) -> dict[str, Any]:
+        """Real JQL search (`/rest/api/3/search/jql`) for every issue key
+        in `project_key` currently sitting in `status` -- the polling
+        alternative to Jira Automation's push webhook (see SETUP.md's
+        "poll-based bridge" option: no Automation rule, no publicly-
+        reachable relay, no job-dispatcher wiring needed to prove the
+        trigger path end-to-end).
+
+        Deliberately returns only issue keys, not a dispatch decision:
+        matches Sec. 4.4's "never treat being in the trigger status
+        alone as sufficient" rule (`gating.py`'s docstring) -- the
+        caller is expected to call `get_issue` for full detail (labels,
+        issue type, description) and `gating.evaluate`/`require` on each
+        candidate before treating any of them as opted in."""
+        try:
+            jql = (
+                f'project = "{_escape_jql_string(project_key)}" '
+                f'AND status = "{_escape_jql_string(status)}"'
+            )
+            resp = self._request(
+                "POST",
+                "/rest/api/3/search/jql",
+                json_body={"jql": jql, "fields": ["summary"], "maxResults": 50},
+            )
+            keys = [issue["key"] for issue in resp.json().get("issues", [])]
+            return Result.ok({"issue_keys": keys}).to_wire()
+        except IssueTrackerError as exc:
+            return self._error_result(exc)
+
     # -- helpers ---------------------------------------------------
 
     def _find_existing(self, *, project_key: str, issue_type: str, summary: str,
