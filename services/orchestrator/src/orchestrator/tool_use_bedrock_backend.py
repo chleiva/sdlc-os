@@ -164,7 +164,17 @@ _SYSTEM_PROMPT = (
     "relevant content, write complete file contents (not a diff/patch "
     "fragment) with write_file. When the subtask is genuinely done, call "
     "finish exactly once with a real commit message -- never before the "
-    "actual file changes are made, and never more than once."
+    "actual file changes are made, and never more than once.\n\n"
+    "You have no tool to execute code, run a test suite, or run any "
+    "shell command -- only read_file/write_file/list_files/finish. Never "
+    "create a script or helper file whose purpose is to run or verify "
+    "tests (e.g. a 'run_tests.sh'/'test_runner.py'-style file); doing so "
+    "achieves nothing (you cannot execute it either) and, if its name "
+    "matches pytest's own test-discovery pattern, actively breaks the "
+    "real automated test run that happens after you finish. If you are "
+    "asked to fix a previously-reported verification failure, edit "
+    "exactly the file(s) the failure names to fix the real defect -- "
+    "never respond by adding test-execution tooling."
 )
 
 

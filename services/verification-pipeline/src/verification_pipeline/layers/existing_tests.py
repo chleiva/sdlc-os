@@ -63,6 +63,40 @@ def run_existing_test_suite_layer(
     # 2. Real local pytest run for per-test granularity.
     run_result = run_pytest(scope_paths, cwd=repo_root, python_executable=python_executable)
 
+    # Real live-run bug this closes: a pytest invocation that never got as
+    # far as running any test at all -- a collection-time crash (exit code
+    # 2, "Interrupted") or an invalid/nonexistent scope path (exit code 4,
+    # "usage error") -- produces a JUnit XML with no <testcase> elements
+    # for `_parse_junit_xml` to find (a suite-level collection error has no
+    # per-test node to attach to). That left `run_result.failing_node_ids`
+    # empty, which the check below silently reported as "0/0 existing
+    # tests passed" -- a clean-looking PASS for a test suite that never
+    # actually ran. Concretely hit on a real live run: the implementation
+    # agent (lacking any tool to execute code) wrote its own test-running
+    # helper script named `test_runner.py`, which pytest's own discovery
+    # then collected as if it were a real test module; the module-level
+    # code in it crashed at import/collection time, aborting the whole
+    # pytest session before test_hello.py's real, correct test ever ran.
+    # The resulting "0/0 passed" summary read as informational to the
+    # verification-fixup agent, which -- unable to tell "no tests ran"
+    # apart from "there is no test runner" -- tried to fix it by writing
+    # *more* test-running scripts, compounding the same collection crash
+    # each retry. pytest returns 0 (clean pass) or 1 (test failures,
+    # already surfaced via real failing_node_ids below) when it genuinely
+    # ran the suite; any other returncode means pytest itself did not
+    # complete a real run, and must never be reported as a pass.
+    if run_result.returncode not in (0, 1):
+        return LayerResult(
+            name="existing_test_suite",
+            status="fail",
+            summary=(
+                f"pytest did not complete a real test run (exit code {run_result.returncode}, "
+                f"{run_result.total} test case(s) collected) -- treated as a failure, not a "
+                "vacuous pass. Real pytest output:\n" + run_result.stdout[-2000:]
+            ),
+            details={"ci_audit": ci_audit, "total": run_result.total, "passed": run_result.passed, "returncode": run_result.returncode},
+        )
+
     if not run_result.failing_node_ids:
         return LayerResult(
             name="existing_test_suite",
