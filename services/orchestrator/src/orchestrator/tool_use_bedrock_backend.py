@@ -206,7 +206,20 @@ class BedrockToolUseAgentBackend(AgentBackend):
         client: Any,
         *,
         workspace_root: Path,
-        max_turns: int = 20,
+        # Real live-run experience: 20 was an arbitrary starting point,
+        # tight enough that even legitimate multi-file subtasks (list a
+        # few files, read for context, write 2-3 files, finish) have
+        # little margin. Raised to 40 as a still-bounded default -- NOT
+        # raised much further than that, deliberately: this loop runs
+        # entirely inside one blocking call, so it is the only guard
+        # against a stuck subtask that can act *within* one subtask
+        # attempt -- the orchestrator's own wall-clock/cost/stuck-
+        # checkpoint budgets (Sec. 9.3) only get evaluated once this call
+        # returns, so they cannot preempt a subtask that goes off the
+        # rails mid-call. A subtask that still can't finish in 40 real
+        # turns is a real signal the plan scoped it too coarsely, not
+        # something to paper over with a much larger number.
+        max_turns: int = 40,
     ) -> None:
         self._config = config
         self._client = client

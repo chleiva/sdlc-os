@@ -115,6 +115,14 @@ def main() -> int:
     aws_region = os.environ.get("AWS_REGION", "us-east-1")
     repository = os.environ.get("LIVE_RUN_REPOSITORY", "chleiva/returnby")
     tenant_id = os.environ.get("LIVE_RUN_TENANT_ID", "live-run-tenant")
+    # Optional override of BedrockToolUseAgentBackend's per-subtask
+    # tool-calling turn cap (default 40 -- see that class's own docstring
+    # for why this is deliberately bounded, not unlimited). Exposed here,
+    # not hardcoded, since the right value is genuinely task-dependent
+    # and this is a manual live-run tool meant for exactly that kind of
+    # tuning without a code edit.
+    max_turns_env = os.environ.get("BEDROCK_MAX_TURNS", "").strip()
+    max_turns = int(max_turns_env) if max_turns_env else None
     owner, repo_name = repository.split("/", 1)
 
     # -- Imports of real sibling packages (after sys.path is set up above) --
@@ -185,10 +193,14 @@ def main() -> int:
 
     # -- Real Bedrock client + the real tool-using implementation backend ---
     bedrock_client = boto3.client("bedrock-runtime", region_name=aws_region)
+    agent_backend_kwargs: dict = {}
+    if max_turns is not None:
+        agent_backend_kwargs["max_turns"] = max_turns
     agent_backend = BedrockToolUseAgentBackend(
         BedrockBackendConfig(model_id=bedrock_model_id, region_name=aws_region),
         bedrock_client,
         workspace_root=worktree_path,
+        **agent_backend_kwargs,
     )
 
     # -- Real Registry + real plan/progress stores ---------------------------
