@@ -62,6 +62,30 @@ def test_size_checkpoint_triggers_over_either_threshold():
     assert check_size(DiffStats(files_touched=("a",), lines_changed=10), budget) is None
 
 
+def test_single_file_diff_gets_a_wider_line_allowance(monkeypatch):
+    """Real calibration gap a real live run surfaced: a single,
+    self-contained new file (a whole game/report generated in one shot)
+    is lower-risk than a many-file diff of the same size, and must not
+    trip the size checkpoint at the bare per-size threshold the way a
+    multi-file diff does."""
+    from orchestrator import checkpoints as checkpoints_module
+
+    monkeypatch.setattr(checkpoints_module, "SINGLE_FILE_LINE_MULTIPLIER", 3)
+    budget = Budget("M", 120, 20, 400, 15)
+
+    # A single-file diff within the multiplied allowance (400*3=1200):
+    # must NOT trigger, even though 771 > the bare 400-line threshold.
+    assert check_size(DiffStats(files_touched=("tetris.html",), lines_changed=771), budget) is None
+
+    # The same line count spread across two files does NOT get the
+    # multiplier -- the bare, multi-file threshold still applies.
+    assert check_size(DiffStats(files_touched=("a.html", "b.js"), lines_changed=771), budget) is not None
+
+    # A single file can still trip it for real if it's big enough (past
+    # the multiplied allowance, not just the bare one).
+    assert check_size(DiffStats(files_touched=("huge.html",), lines_changed=1500), budget) is not None
+
+
 def test_risk_checkpoint_is_a_pure_set_difference():
     trigger = check_risk(DiffStats(files_touched=("a.py", "b.py", "c.py"), lines_changed=1), declared_scope_in=("a.py", "b.py"))
     assert trigger is not None

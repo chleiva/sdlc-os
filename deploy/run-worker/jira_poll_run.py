@@ -69,6 +69,7 @@ pipeline once it finds a story.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -79,6 +80,7 @@ from _run_lib import DATA_DIR, REPO_ROOT, Environment, RunOutcome, load_dotenv, 
 
 _PROCESSED_PATH = DATA_DIR / "jira_processed.json"
 _PENDING_PATH = DATA_DIR / "jira_pending_decisions.json"
+_LOCK_PATH = DATA_DIR / "jira_poll.lock"
 
 # A human's reply comment must be exactly one of these words (trailing
 # punctuation/whitespace/case ignored) -- deliberately narrow, matching
@@ -422,8 +424,37 @@ def _tick() -> None:
     _poll_once()
 
 
+def _acquire_lock_or_exit() -> None:
+    """Real bug this closes: two `jira_poll_run.py` invocations (a
+    `--watch` loop already running, plus a one-shot second invocation
+    started in another terminal -- exactly what happened on a real
+    live run) raced to resume the same paused run, and one of them hit
+    a real `OrchestratorError` from `core.py`'s drive loop (see
+    `core.py`'s own comment on this -- a defensive fix landed there
+    too, but preventing the race outright, not just surviving it, is
+    the real fix for what this single-operator manual tool actually
+    needs: no more than one instance running against this same `data/`
+    directory at a time. A plain `flock` on a lock file is sufficient
+    -- this is a local, single-machine tool, not a distributed system;
+    released automatically on process exit (including a crash), so a
+    stale lock from a killed process never wedges future runs."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    lock_file = open(_LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            "jira_poll_run.py: another instance is already running (lock held on "
+            f"{_LOCK_PATH}) -- refusing to start a second one against the same run data."
+        )
+    # Deliberately never closed/released explicitly: held for this
+    # process's entire lifetime, released automatically (by the OS) on
+    # exit of any kind.
+
+
 def main() -> int:
     load_dotenv(REPO_ROOT / ".env")
+    _acquire_lock_or_exit()
 
     watch_seconds: float | None = None
     args = sys.argv[1:]

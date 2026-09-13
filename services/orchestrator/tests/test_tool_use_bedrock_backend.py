@@ -15,6 +15,7 @@ turn-budget bugs surfaced only on a real live run instead of in CI.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,22 @@ def test_implement_subtask_writes_a_real_file_and_reports_a_real_diff(backend, f
     assert (git_fixture_repo / "hello.py").read_text() == "def greet(name):\n    return f'Hello, {name}!'\n"
     assert diff.lines_changed >= 1
 
+    # Real, severe bug this closes: nothing anywhere in this pipeline
+    # ever ran a real `git commit` -- `DiffOutput.commit_message` was
+    # computed and carried all the way through to a real PR body, but
+    # the actual file change stayed real, UNCOMMITTED working-tree
+    # state forever. `_packaging_fn`'s `git push HEAD:...` only ever
+    # transmits *committed* history, so it silently pushed just the
+    # worktree's original base commit every single time -- confirmed
+    # against a real GitHub repo this session: every prior "real PR"
+    # this session believed had succeeded was actually empty.
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1", "--pretty=%s"], cwd=git_fixture_repo, capture_output=True, text=True, check=True,
+    )
+    assert log.stdout.strip() == "add greet()"
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=git_fixture_repo, capture_output=True, text=True, check=True)
+    assert status.stdout.strip() == ""  # nothing left uncommitted
+
 
 def test_read_then_write_then_finish_is_a_real_multi_turn_loop(backend, fake_client, git_fixture_repo):
     """Proves this is a genuine multi-turn loop (not a single call):
@@ -83,6 +100,35 @@ def test_read_then_write_then_finish_is_a_real_multi_turn_loop(backend, fake_cli
     assert diff.files_touched == ("README.md",)
     assert (git_fixture_repo / "README.md").read_text() == "# fixture\nupdated\n"
     assert len(fake_client.call_log) == 3  # read, write, finish -- three real converse calls
+
+
+def test_each_subtask_gets_its_own_real_commit_with_a_distinct_bot_identity(backend, fake_client, git_fixture_repo):
+    """Two real subtasks in the same backend instance must produce two
+    real, separate commits (not one combined commit, and not zero) --
+    and neither commit may be attributed to whatever this machine's own
+    `~/.gitconfig` says (a real human operator's identity, or nothing
+    at all in a fresh environment) -- Sec. 15/17.1's real non-human-
+    identity principle applies to commit authorship."""
+    fake_client.queue_response(converse_response_with_tool_call("write_file", {"path": "a.py", "content": "a = 1\n"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add a.py", "summary": "s"}))
+    backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="add a.py", parallel_group=None, depends_on=()),
+    )
+
+    fake_client.queue_response(converse_response_with_tool_call("write_file", {"path": "b.py", "content": "b = 2\n"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add b.py", "summary": "s"}))
+    backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t2", description="add b.py", parallel_group=None, depends_on=()),
+    )
+
+    log = subprocess.run(
+        ["git", "log", "--pretty=%s|%an|%ae", "-2"], cwd=git_fixture_repo, capture_output=True, text=True, check=True,
+    )
+    lines = log.stdout.strip().splitlines()
+    assert lines[0] == "add b.py|SDLC Auto|sdlc-auto@users.noreply.github.com"
+    assert lines[1] == "add a.py|SDLC Auto|sdlc-auto@users.noreply.github.com"
 
 
 def test_a_transient_read_timeout_is_retried_then_the_turn_succeeds(fake_client, git_fixture_repo):

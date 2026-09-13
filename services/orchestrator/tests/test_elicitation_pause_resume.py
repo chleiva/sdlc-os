@@ -13,8 +13,9 @@ comes back."""
 from __future__ import annotations
 
 from run_registry import RegistryService
+from run_registry import stages as rr_stages
 
-from orchestrator.model_backend import ScriptedAgentBackend, SubTask
+from orchestrator.model_backend import AgentBackend, DiffOutput, ScriptedAgentBackend, SubTask
 from orchestrator.verification import ScriptedVerificationRunner, VerificationResult
 
 from ._factories import make_diff_output, make_plan_output
@@ -141,3 +142,56 @@ def test_stuck_checkpoint_fires_after_default_retry_budget_exhausted(registry, t
     # 3" -- that one triggers the stuck pause before a corresponding
     # fix-up would run).
     assert backend.implement_call_count == 3
+
+
+def test_concurrent_writer_already_at_verification_does_not_crash_the_drive_loop(registry, tenant_id, plan_store, progress_store):
+    """Real bug found on a real live run: two concurrent `jira_poll_run
+    .py` invocations (no process-level lock existed yet -- see
+    `deploy/run-worker`'s new lock file for the other half of this fix)
+    raced to resume the same run. By the time one process's `_drive`
+    loop reached its own `_transition(run, VERIFICATION)` call, the
+    *other* process had already made that exact move -- and
+    `run_registry.stages`'s transition graph correctly has no
+    VERIFICATION -> VERIFICATION edge (a transition must always be a
+    real move), so the unconditional transition raised a real
+    `OrchestratorError`. Simulated here without needing two real
+    processes: a custom `AgentBackend.implement_subtask` that, as a
+    side effect, transitions the Registry to VERIFICATION directly
+    (standing in for "a concurrent writer already did this") before
+    returning its own diff -- `core.py`'s `_drive` loop must tolerate
+    finding the run already there, not crash."""
+
+    class ConcurrentWriterBackend(AgentBackend):
+        def __init__(self, plan):
+            self._plan = plan
+
+        def author_plan(self, *, run_context):
+            return self._plan
+
+        def re_plan(self, *, run_context, feedback):
+            raise AssertionError("not exercised in this test")
+
+        def implement_subtask(self, *, run_context, subtask):
+            # Simulate a second, concurrent process's `_drive` loop
+            # already having moved this exact run to VERIFICATION.
+            run = registry.get_run(tenant_id=tenant_id, run_id=run_context["run_id"]).data
+            result = registry.transition_stage(
+                tenant_id=tenant_id, run_id=run.id, expected_version=run.version, next_stage=rr_stages.VERIFICATION,
+            )
+            assert result.is_ok, result.error
+            return DiffOutput(files_touched=("src/foo.py",), lines_changed=5, commit_message="c", subtask_id=subtask.task_id)
+
+    plan = make_plan_output(subtasks=[SubTask(task_id="t1", description="implement foo", parallel_group=None, depends_on=())])
+    backend = ConcurrentWriterBackend(plan)
+    verifier = ScriptedVerificationRunner([VerificationResult(passed=True, summary="ok")])
+    orch = make_orchestrator(
+        registry=registry, tenant_id=tenant_id, plan_store=plan_store, progress_store=progress_store,
+        agent_backend=backend, verification_runner=verifier,
+    )
+    status = orch.start_run(jira_key="PROJ-40", repo="acme/app", branch="feature/race", trace_id="trace-40")
+
+    # Must not raise -- this is the exact real crash found on a live
+    # run (`OrchestratorError: 'verification' is not a legal next stage
+    # from 'verification'`) before the fix.
+    status = orch.approve_plan(status.run_id, decision="approve")
+    assert status.stage == "change_review_gate"

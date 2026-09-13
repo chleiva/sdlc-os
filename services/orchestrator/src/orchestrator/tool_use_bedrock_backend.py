@@ -344,6 +344,24 @@ class BedrockToolUseAgentBackend(AgentBackend):
             )
 
         files_touched, lines_changed = self._real_git_diff_stats()
+        # Real bug this closes -- and a severe one: nothing anywhere in
+        # this whole pipeline ever ran a real `git commit`. `DiffOutput
+        # .commit_message` existed and was carried all the way through
+        # to the real PR body, but the actual file changes underneath
+        # it were only ever real, UNCOMMITTED working-tree edits.
+        # `_packaging_fn`'s `git push HEAD:refs/heads/<branch>` only
+        # ever transmits *committed* history -- it silently pushed just
+        # the worktree's original base commit, every single time,
+        # producing a real branch/PR with none of the actual generated
+        # code in it. Confirmed against a real repo: every prior "real
+        # PR" this session believed had succeeded would have been
+        # empty. Committing here, once per subtask (using the model's
+        # own real commit message, exactly what it's for), is also what
+        # makes each subtask's own diff stats above correct in
+        # isolation -- the next subtask's `git diff --numstat HEAD`
+        # starts clean instead of accumulating every prior subtask's
+        # changes into one undifferentiated blob.
+        self._real_git_commit(commit_message or f"Implement {subtask.task_id}")
         return DiffOutput(
             files_touched=tuple(files_touched),
             lines_changed=lines_changed,
@@ -429,6 +447,49 @@ class BedrockToolUseAgentBackend(AgentBackend):
                     lines_changed += sum(1 for _ in candidate.open(errors="replace"))
 
         return files_touched, lines_changed
+
+    def _real_git_commit(self, message: str) -> None:
+        """Real `git add -A` + `git commit` against the real worktree --
+        see `implement_subtask`'s own comment for the real bug this
+        closes (nothing ever committed before this, so nothing ever
+        really got pushed). A no-op, not an error, if there is nothing
+        to commit (e.g. a subtask that made no real file change, or --
+        defensively -- if this is somehow called twice in a row with no
+        new changes in between)."""
+        add = subprocess.run(["git", "add", "-A"], cwd=self._workspace_root, capture_output=True, text=True, check=False)
+        if add.returncode != 0:
+            raise BedrockInvocationError(f"real 'git add -A' failed in {self._workspace_root}: {add.stderr}")
+
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"], cwd=self._workspace_root, capture_output=True, check=False,
+        )
+        if staged.returncode == 0:
+            # Real `git diff --cached --quiet` exit code convention:
+            # 0 means nothing is staged -- nothing to commit, not a
+            # failure (a subtask can legitimately make no real change,
+            # e.g. one that only reads files to orient itself).
+            return
+
+        # Real author identity, not whatever this machine's own
+        # `~/.gitconfig` happens to say (which could be missing
+        # entirely in a fresh environment, or could be a real human
+        # operator's own identity -- Sec. 15/17.1's "named, not
+        # anonymous" non-human-identity principle applies to commit
+        # authorship exactly as it already does to the GitHub bot actor
+        # `source_control.audit.bot_actor` computes). `-c` scopes this
+        # to just this one command, never touching the real repo's or
+        # this machine's own git config.
+        commit = subprocess.run(
+            [
+                "git",
+                "-c", "user.name=SDLC Auto",
+                "-c", "user.email=sdlc-auto@users.noreply.github.com",
+                "commit", "-m", message,
+            ],
+            cwd=self._workspace_root, capture_output=True, text=True, check=False,
+        )
+        if commit.returncode != 0:
+            raise BedrockInvocationError(f"real 'git commit' failed in {self._workspace_root}: {commit.stderr}")
 
     # -- Converse plumbing (auto tool choice, multiple real tools) ---------
 

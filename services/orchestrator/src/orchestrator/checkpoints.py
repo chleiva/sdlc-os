@@ -46,6 +46,21 @@ DEFAULT_BUDGETS: dict[str, Budget | None] = {
 # The 80% pre-warning threshold before the 100% hard stop (Section 9.4).
 TIME_COST_WARNING_FRACTION = 0.8
 
+# ASSUMPTION FLAGGED FOR HUMAN REVIEW (a real user confirmed this
+# reading on a real live run): Section 9.4's size-checkpoint line
+# threshold was calibrated for an incremental change spread across an
+# existing codebase, where a large multi-file diff is a real signal
+# something may be going further than intended. It fired just as
+# eagerly for a single, self-contained new file (a whole game/report/
+# script generated in one shot, exactly as asked for) -- a materially
+# lower-risk shape (one file to review, no cross-file blast radius)
+# than a many-file diff of the same total size. A single-file diff's
+# line threshold is multiplied by this factor before the size
+# checkpoint's line half of the OR condition is evaluated; the
+# file-count half is untouched (a single file can never trip it on
+# file count alone anyway).
+SINGLE_FILE_LINE_MULTIPLIER = 3
+
 
 class XLNotRunnableError(Exception):
     """Raised when budget resolution would require an XL budget -- Section
@@ -106,18 +121,25 @@ class CheckpointTrigger:
 
 
 def check_size(diff_stats: DiffStats, budget: Budget) -> CheckpointTrigger | None:
-    if diff_stats.lines_changed > budget.size_checkpoint_lines or len(diff_stats.files_touched) > budget.size_checkpoint_files:
+    # See SINGLE_FILE_LINE_MULTIPLIER's own module-level comment for why
+    # a single-file diff gets a real, explicit, wider line allowance
+    # instead of the bare per-size threshold.
+    effective_line_threshold = budget.size_checkpoint_lines
+    if len(diff_stats.files_touched) <= 1:
+        effective_line_threshold = budget.size_checkpoint_lines * SINGLE_FILE_LINE_MULTIPLIER
+
+    if diff_stats.lines_changed > effective_line_threshold or len(diff_stats.files_touched) > budget.size_checkpoint_files:
         return CheckpointTrigger(
             kind="size",
             reason=(
                 f"diff of {diff_stats.lines_changed} changed lines across "
                 f"{len(diff_stats.files_touched)} files exceeds the {budget.story_size} "
-                f"budget ({budget.size_checkpoint_lines} lines / {budget.size_checkpoint_files} files)"
+                f"budget ({effective_line_threshold} lines / {budget.size_checkpoint_files} files)"
             ),
             details={
                 "lines_changed": diff_stats.lines_changed,
                 "files_touched": len(diff_stats.files_touched),
-                "threshold_lines": budget.size_checkpoint_lines,
+                "threshold_lines": effective_line_threshold,
                 "threshold_files": budget.size_checkpoint_files,
             },
         )

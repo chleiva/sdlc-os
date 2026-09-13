@@ -406,7 +406,24 @@ class Orchestrator:
                 if outcome == "paused":
                     continue
                 if outcome == "verify":
-                    run = self._transition(run, rr_stages.VERIFICATION)
+                    # Real bug this closes: found on a real live run
+                    # driven by two concurrent `jira_poll_run.py`
+                    # invocations racing to resume the same run (no
+                    # process-level lock existed yet -- see
+                    # `deploy/run-worker/_run_lib.py`'s new lock file
+                    # for the other half of this fix). By the time this
+                    # line ran, a concurrent process had already moved
+                    # `run.stage` to VERIFICATION for the exact same
+                    # subtask/fix-up outcome, and the unconditional
+                    # `_transition` below raised a real
+                    # `OrchestratorError` ("'verification' is not a
+                    # legal next stage from 'verification'") --
+                    # `run_registry.stages`'s transition graph correctly
+                    # has no VERIFICATION -> VERIFICATION edge (a
+                    # transition must always be a real move). Only
+                    # transition if this run isn't already there.
+                    if run.stage != rr_stages.VERIFICATION:
+                        run = self._transition(run, rr_stages.VERIFICATION)
                 continue
 
             if stage == rr_stages.VERIFICATION:
