@@ -264,6 +264,58 @@ def test_soft_timeout_is_retried_then_raises_bedrock_throttled_error(fake_client
         backend.author_plan(run_context={})
 
 
+def test_falls_over_to_fallback_region_when_primary_exhausts_retries(fake_client):
+    """Real live-run finding this closes: a persistent regional Bedrock
+    slowdown/outage (every retry in one region timing out) is
+    recoverable by trying a different region that serves the same
+    model, not just giving up. `fake_client` is the primary
+    (us-east-1-shaped); a second, independent fake client stands in for
+    a real fallback region's own client."""
+    fallback_client = FakeBedrockRuntimeClient()
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockAgentBackend(config, fake_client, fallback_clients=[(fallback_client, "us-west-2")])
+
+    for _ in range(2):  # exhausts the primary region's own retry budget
+        fake_client.queue_response(_client_error("ThrottlingException", "slow down", http_status=429))
+    fallback_client.queue_response(converse_response_with_tool_call("emit_plan", _PLAN_INPUT))
+
+    plan = backend.author_plan(run_context={})
+    assert plan.outcomes == _PLAN_INPUT["outcomes"]
+    assert len(fake_client.call_log) == 2  # primary region's full budget was spent first
+    assert len(fallback_client.call_log) == 1  # fallback succeeded on its first attempt
+
+
+def test_all_regions_exhausted_raises_bedrock_throttled_error(fake_client):
+    fallback_client = FakeBedrockRuntimeClient()
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockAgentBackend(config, fake_client, fallback_clients=[(fallback_client, "us-west-2")])
+
+    for _ in range(2):
+        fake_client.queue_response(_client_error("ThrottlingException", "slow down", http_status=429))
+    for _ in range(2):
+        fallback_client.queue_response(_client_error("ThrottlingException", "still slow", http_status=429))
+
+    with pytest.raises(BedrockThrottledError):
+        backend.author_plan(run_context={})
+    assert len(fake_client.call_log) == 2
+    assert len(fallback_client.call_log) == 2  # the fallback region got its own full budget too
+
+
+def test_access_denied_never_falls_over_to_a_fallback_region(fake_client):
+    """A real credentials/permissions problem is not fixed by trying a
+    different region -- must raise immediately, never touching the
+    fallback client at all."""
+    fallback_client = FakeBedrockRuntimeClient()
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockAgentBackend(config, fake_client, fallback_clients=[(fallback_client, "us-west-2")])
+
+    fake_client.queue_response(_client_error("AccessDeniedException", "no access", http_status=403))
+
+    with pytest.raises(BedrockAccessDeniedError):
+        backend.author_plan(run_context={})
+    assert len(fallback_client.call_log) == 0
+
+
 def test_non_throttling_client_error_raises_bedrock_invocation_error_without_retry(fake_client, backend):
     fake_client.queue_response(_client_error("ValidationException", "bad request shape", http_status=400))
 

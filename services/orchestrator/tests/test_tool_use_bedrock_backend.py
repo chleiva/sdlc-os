@@ -132,6 +132,31 @@ def test_persistent_connection_errors_exhaust_retries_and_raise_bedrock_throttle
     assert len(fake_client.call_log) == 2  # both retry attempts consumed, then gave up
 
 
+def test_implementation_loop_falls_over_to_a_fallback_region_too(fake_client, git_fixture_repo):
+    """The same real region-fallback resilience `bedrock_backend
+    .call_converse_with_retry` gives planning must also cover the
+    multi-turn implementation loop -- both are real Converse call sites
+    hitting the exact same real regional failure mode."""
+    fallback_client = FakeBedrockRuntimeClient()
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1", max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockToolUseAgentBackend(
+        config, fake_client, workspace_root=git_fixture_repo, fallback_clients=[(fallback_client, "us-west-2")],
+    )
+
+    for _ in range(2):
+        fake_client.queue_response(ReadTimeoutError(endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com/model/fake/converse"))
+    fallback_client.queue_response(converse_response_with_tool_call("write_file", {"path": "hello.py", "content": "x = 1\n"}))
+    fallback_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add hello.py", "summary": "added"}))
+
+    diff = backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="add hello.py", parallel_group=None, depends_on=()),
+    )
+    assert diff.files_touched == ("hello.py",)
+    assert len(fake_client.call_log) == 2  # primary region's full budget spent first
+    assert len(fallback_client.call_log) == 2  # write + finish, both against the fallback region
+
+
 def test_never_calling_finish_raises_within_the_derived_turn_budget(fake_client, git_fixture_repo):
     """An "S"-sized story derives a small, real turn budget (see
     `_max_turns_for_story_size`) -- queue one more list_files response

@@ -259,14 +259,27 @@ class BedrockToolUseAgentBackend(AgentBackend):
         # None (the default) means "derive it per-call from run_context
         # ['story_size']" -- see `_max_turns_for_story_size`.
         max_turns: int | None = None,
+        # (New) real (client, region_name) pairs to fail over to if
+        # `client`/`config.region_name` exhausts its own retry budget --
+        # see `bedrock_backend.call_converse_with_retry`. Passed through
+        # to the composed planning backend too, so a plan/re-plan call
+        # gets the exact same regional resilience as implementation.
+        fallback_clients: "list[tuple[Any, str]] | None" = None,
     ) -> None:
         self._config = config
         self._client = client
         self._workspace_root = Path(workspace_root)
         self._max_turns_override = max_turns
+        self._fallback_clients = fallback_clients or []
+        # One instance, one sticky region preference (see
+        # `bedrock_backend.call_converse_with_retry`'s own docstring) --
+        # separate from the composed planning backend's own, since
+        # planning and implementation are different real Converse call
+        # sites that may legitimately land on different regions.
+        self._sticky_state: dict = {"index": 0}
         # Planning delegates to the existing, already-real structured-output
         # backend -- composition, not reimplementation (see module docstring).
-        self._plan_backend = BedrockAgentBackend(config, client)
+        self._plan_backend = BedrockAgentBackend(config, client, fallback_clients=fallback_clients)
 
     # -- AgentBackend interface -------------------------------------------------
 
@@ -437,7 +450,10 @@ class BedrockToolUseAgentBackend(AgentBackend):
             "toolConfig": {"tools": _TOOL_SPECS, "toolChoice": {"auto": {}}},
         }
         try:
-            return call_converse_with_retry(client=self._client, request_kwargs=request_kwargs, config=self._config)
+            return call_converse_with_retry(
+                client=self._client, request_kwargs=request_kwargs, config=self._config,
+                fallback_clients=self._fallback_clients, sticky_state=self._sticky_state,
+            )
         except (BedrockThrottledError, BedrockAccessDeniedError, BedrockInvocationError, BedrockMalformedOutputError):
             raise
         except Exception as exc:  # pragma: no cover - defensive: surface any other real boto3/ClientError as-is

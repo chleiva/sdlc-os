@@ -179,7 +179,17 @@ Optional env vars this tool alone reads (not part of the Docker Compose
 `chleiva/returnby`), `LIVE_RUN_TENANT_ID` (default `live-run-tenant`),
 `BEDROCK_MAX_TURNS` (overrides `BedrockToolUseAgentBackend`'s per-subtask
 turn cap, which otherwise derives from the plan's own story size — see
-that class's docstring).
+that class's docstring), `BEDROCK_FALLBACK_REGIONS` (comma-separated
+real AWS regions to fail over to if `AWS_REGION` exhausts its own
+retry budget — a real, persistent regional Bedrock timeout is
+recoverable this way rather than just giving up; the fallback
+region *sticks* for the rest of the run once it succeeds once, so a
+multi-turn implementation loop doesn't keep re-paying the dead
+region's full timeout on every turn — see `bedrock_backend
+.call_converse_with_retry`'s own docstring. Confirm your chosen
+fallback regions actually serve the same model first, e.g. `aws
+bedrock get-foundation-model --model-identifier <id> --region
+<region>`).
 
 ## Run it — `jira_poll_run.py` (task pulled from a real Jira story)
 

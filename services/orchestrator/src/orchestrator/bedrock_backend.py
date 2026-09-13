@@ -112,6 +112,7 @@ environment cannot itself verify against a live account.
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import json
 import logging
 import time
@@ -390,19 +391,10 @@ def _call_with_soft_timeout(client: Any, request_kwargs: dict, *, timeout_second
         pool.shutdown(wait=False)
 
 
-def call_converse_with_retry(*, client: Any, request_kwargs: dict, config: "BedrockBackendConfig") -> dict:
-    """Call `bedrock-runtime`'s real `converse` operation, retrying with
-    exponential backoff on a soft timeout, Bedrock's own throttling/
-    transient error codes, or a connection-level `BotoCoreError`
-    (including `ReadTimeoutError`/`ConnectTimeoutError` -- both real
-    `BotoCoreError` subclasses, so this same branch covers exactly the
-    failure this docstring's module-level comment describes). Never
-    retries an access-denied code (retrying with the same credentials
-    changes nothing) or any other `ClientError` (a defect in the request
-    itself, not a transient condition). Returns the raw Converse API
-    response dict -- callers extract whatever shape they need from it
-    (a single forced tool call's input, or a multi-turn tool-use
-    message)."""
+def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, config: "BedrockBackendConfig") -> dict:
+    """`call_converse_with_retry`'s real retry-with-backoff loop against
+    exactly one region/client -- see that function for the public
+    entrypoint, which wraps this with region fallback."""
     response: dict | None = None
     last_transient_summary: str | None = None
 
@@ -502,6 +494,80 @@ def call_converse_with_retry(*, client: Any, request_kwargs: dict, config: "Bedr
     return response
 
 
+def call_converse_with_retry(
+    *, client: Any, request_kwargs: dict, config: "BedrockBackendConfig",
+    fallback_clients: "list[tuple[Any, str]] | None" = None,
+    sticky_state: "dict | None" = None,
+) -> dict:
+    """Call `bedrock-runtime`'s real `converse` operation against
+    `client`/`config.region_name`, retrying with exponential backoff on
+    a soft timeout, Bedrock's own throttling/transient error codes, or a
+    connection-level `BotoCoreError` (including `ReadTimeoutError`/
+    `ConnectTimeoutError` -- both real `BotoCoreError` subclasses).
+    Never retries an access-denied code (retrying with the same
+    credentials changes nothing) or any other `ClientError` (a defect
+    in the request itself, not a transient condition).
+
+    `fallback_clients` (New -- real live-run finding: a persistent
+    regional Bedrock slowdown/outage exhausted every retry in one
+    region on a real run): additional real `(client, region_name)`
+    pairs, each a real `boto3.client("bedrock-runtime", region_name=...)`
+    for a region that also serves this same model. If the primary
+    region exhausts its own `max_retries` (a real `BedrockThrottledError`),
+    this tries each fallback region in turn, each getting its own full
+    retry budget, before finally giving up. Never falls over on
+    `BedrockAccessDeniedError`/`BedrockInvocationError` -- those mean
+    the request or credentials are the problem, not the region, and
+    retrying the identical request against a different region would not
+    change that.
+
+    `sticky_state` (New): a small caller-owned `dict` (e.g.
+    `{"index": 0}`, one per `BedrockAgentBackend`/
+    `BedrockToolUseAgentBackend` instance, persisting across every real
+    Converse call that instance makes) this function reads its starting
+    region from and updates on success. Without this, a multi-turn
+    session (the implementation loop) would retry the *dead* primary
+    region's full budget again on every single turn even after a
+    fallback region already proved to work -- wasteful (this session's
+    real default: up to 180s x 3 wasted, every turn) and pointless once
+    one real outage is already known. With it, a fallback that
+    succeeded once becomes this instance's new preferred region for
+    every subsequent call, and only falls back further (or back to the
+    original) if that region itself later fails too.
+
+    Returns the raw Converse API response dict -- callers extract
+    whatever shape they need from it (a single forced tool call's
+    input, or a multi-turn tool-use message)."""
+    attempts: list[tuple[Any, "BedrockBackendConfig"]] = [(client, config)]
+    for fallback_client, fallback_region in fallback_clients or []:
+        attempts.append((fallback_client, dataclasses.replace(config, region_name=fallback_region)))
+
+    start = (sticky_state.get("index", 0) % len(attempts)) if sticky_state is not None else 0
+    order = list(range(start, len(attempts))) + list(range(0, start))
+
+    last_error: BedrockThrottledError | None = None
+    for position, index in enumerate(order):
+        attempt_client, attempt_config = attempts[index]
+        try:
+            response = _call_converse_with_retry_one_region(client=attempt_client, request_kwargs=request_kwargs, config=attempt_config)
+        except BedrockThrottledError as e:
+            last_error = e
+            if position < len(order) - 1:
+                next_region = attempts[order[position + 1]][1].region_name
+                logger.warning(
+                    "Bedrock region %r exhausted its own retry budget; falling over to region %r",
+                    attempt_config.region_name, next_region,
+                )
+            continue
+
+        if sticky_state is not None:
+            sticky_state["index"] = index
+        return response
+
+    assert last_error is not None  # for type-checkers; unreachable otherwise (attempts always has >=1 entry)
+    raise last_error
+
+
 # ---------------------------------------------------------------------------
 # Backend
 # ---------------------------------------------------------------------------
@@ -512,7 +578,7 @@ class BedrockAgentBackend(AgentBackend):
     `Converse` API. See module docstring for what's real vs. mocked, the
     structured-output mechanism, and why `model_id` has no default."""
 
-    def __init__(self, config: BedrockBackendConfig, client: Any) -> None:
+    def __init__(self, config: BedrockBackendConfig, client: Any, *, fallback_clients: "list[tuple[Any, str]] | None" = None) -> None:
         """`client` is a dependency-injected object implementing the same
         `.converse(**kwargs) -> dict` call signature as a real `boto3`
         `bedrock-runtime` client (constructed by the caller, e.g.
@@ -521,9 +587,18 @@ class BedrockAgentBackend(AgentBackend):
         connect/read timeouts, its own botocore-level retry policy -- the
         caller wants). This module never constructs its own client and
         never reads AWS credentials, environment variables, or shared
-        config itself -- see module docstring."""
+        config itself -- see module docstring.
+
+        `fallback_clients` (New): additional real `(client, region_name)`
+        pairs -- caller-constructed, same discipline as `client` above
+        -- to fail over to, in order, if `client`/`config.region_name`
+        exhausts its own retry budget. See `call_converse_with_retry`."""
         self._config = config
         self._client = client
+        self._fallback_clients = fallback_clients or []
+        # One instance, one sticky region preference -- see
+        # `call_converse_with_retry`'s own docstring for why.
+        self._sticky_state: dict = {"index": 0}
 
     # -- AgentBackend interface -------------------------------------------------
 
@@ -614,7 +689,10 @@ class BedrockAgentBackend(AgentBackend):
                 "toolChoice": {"tool": {"name": tool_name}},
             },
         }
-        response = call_converse_with_retry(client=self._client, request_kwargs=request_kwargs, config=self._config)
+        response = call_converse_with_retry(
+            client=self._client, request_kwargs=request_kwargs, config=self._config,
+            fallback_clients=self._fallback_clients, sticky_state=self._sticky_state,
+        )
         return self._extract_tool_input(response, tool_name=tool_name)
 
     def _extract_tool_input(self, response: dict, *, tool_name: str) -> dict:

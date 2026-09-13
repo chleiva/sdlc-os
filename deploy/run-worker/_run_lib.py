@@ -191,6 +191,14 @@ def _build_environment(
 
     bedrock_model_id = require_env("BEDROCK_MODEL_ID")
     aws_region = os.environ.get("AWS_REGION", "us-east-1")
+    # Real live-run finding: a persistent regional Bedrock slowdown
+    # exhausted every retry in one region outright. Comma-separated
+    # real region names this same model is also confirmed available in
+    # (verified earlier via `aws bedrock list-foundation-models` for
+    # MiniMax M2.5: us-east-1/us-west-2/us-east-2) -- see
+    # `bedrock_backend.call_converse_with_retry`'s own docstring for
+    # the real fallback+sticky-region mechanism this feeds.
+    fallback_regions = [r.strip() for r in os.environ.get("BEDROCK_FALLBACK_REGIONS", "").split(",") if r.strip()]
     repository = os.environ.get("LIVE_RUN_REPOSITORY", "chleiva/returnby")
     tenant_id = os.environ.get("LIVE_RUN_TENANT_ID", "live-run-tenant")
     max_turns_env = os.environ.get("BEDROCK_MAX_TURNS", "").strip()
@@ -258,9 +266,12 @@ def _build_environment(
         worktree_path = Path(worktree_result["data"]["worktree_path"])
         print(f"[run] Real worktree ready at {worktree_path}")
 
-    # -- Real Bedrock client + the real tool-using implementation backend ---
+    # -- Real Bedrock client(s) + the real tool-using implementation backend ---
     bedrock_client = boto3.client("bedrock-runtime", region_name=aws_region)
-    agent_backend_kwargs: dict = {}
+    fallback_clients = [(boto3.client("bedrock-runtime", region_name=r), r) for r in fallback_regions]
+    if fallback_clients:
+        print(f"[run] Real Bedrock fallback regions configured: {[r for _, r in fallback_clients]}")
+    agent_backend_kwargs: dict = {"fallback_clients": fallback_clients} if fallback_clients else {}
     if max_turns is not None:
         agent_backend_kwargs["max_turns"] = max_turns
     agent_backend = BedrockToolUseAgentBackend(
@@ -454,37 +465,63 @@ def start_run_async(*, task_description: str, real_jira_key: str, on_pause: Call
 
 def resume_paused_run_async(
     *, run_id: str, real_jira_key: str, task_description: str, branch_name: str, worktree_path: str,
-    decision: str, on_pause: Callable[[Any, Environment], None],
+    pause_kind: str, stage: str, decision: str, on_pause: Callable[[Any, Environment], None],
 ) -> RunOutcome:
     """`jira_poll_run.py`'s entrypoint once a human has replied on the
     paused issue: rebuild the environment pointed at the *same*
-    branch/worktree the original invocation used, apply `decision` to
-    whichever pause the run is actually sitting at (read from the
-    Registry via `resume_run`, not assumed), then keep driving with the
-    same async, never-blocking resolver as `start_run_async`."""
+    branch/worktree the original invocation used, and apply `decision`
+    -- but only if the run is genuinely still sitting at the exact
+    pause (`pause_kind`/`stage`) the caller recorded the human's reply
+    against.
+
+    Real bug this closes: a real, transient failure (e.g. a Bedrock
+    timeout that exhausts its own retries) can happen *after*
+    `approve_plan`/`resolve_checkpoint` already durably applied the
+    decision and `_drive()` had already moved on to a later real stage
+    -- `core.py`'s state machine has no in-between "half-applied"
+    state, the decision either landed for real or the call never
+    happened at all. The previous version always re-applied `decision`
+    unconditionally on every retry, which would double-apply it to
+    whatever pause `resume_run` now finds (an `OrchestratorError`, or
+    worse, silently approving a *different*, later pause the human
+    never actually saw). `resume_run` alone -- with no decision applied
+    -- already re-drives the run exactly as far as it can go from its
+    real, durable state; this only applies `decision` when that lands
+    back on the *same* pause, and otherwise lets `drive()` below react
+    to whatever the run is genuinely doing now (a brand new pause is
+    just handled like any other -- `on_pause` notifies Jira about it;
+    a real completion just returns as one)."""
     env = _build_environment(
         task_description=task_description, real_jira_key=real_jira_key,
         branch_name=branch_name, worktree_path=Path(worktree_path),
     )
     status = env.orchestrator.resume_run(run_id)
-    if not status.paused:
-        raise SystemExit(f"resume_paused_run_async: run {run_id!r} is not paused (stage={status.stage!r}) -- nothing to apply a decision to")
 
-    if status.pause_kind == "gate":
-        if status.stage == "plan_approval_gate":
-            status = env.orchestrator.approve_plan(run_id, decision=decision)
-        elif status.stage == "change_review_gate":
-            status = env.orchestrator.approve_change_review(run_id, decision=decision)
-        else:
-            raise SystemExit(f"unexpected gate stage {status.stage!r}")
-    elif status.pause_kind == "checkpoint":
-        status = env.orchestrator.resolve_checkpoint(run_id, decision=decision)
-    else:
-        raise SystemExit(f"unexpected pause_kind {status.pause_kind!r}")
+    if status.paused and status.pause_kind == pause_kind and status.stage == stage:
+        if status.pause_kind == "gate":
+            if status.stage == "plan_approval_gate":
+                status = env.orchestrator.approve_plan(run_id, decision=decision)
+            elif status.stage == "change_review_gate":
+                status = env.orchestrator.approve_change_review(run_id, decision=decision)
+            else:
+                raise SystemExit(f"unexpected gate stage {status.stage!r}")
+        else:  # checkpoint
+            status = env.orchestrator.resolve_checkpoint(run_id, decision=decision)
 
-    if decision in ("reject", "stop"):
-        print(f"[run] Run abandoned (decision={decision!r}).")
-        return RunOutcome(exit_code=1, run_id=status.run_id, final_stage=status.stage)
+        if decision in ("reject", "stop"):
+            print(f"[run] Run abandoned (decision={decision!r}).")
+            return RunOutcome(exit_code=1, run_id=status.run_id, final_stage=status.stage)
+    elif status.paused:
+        print(
+            f"[run] {run_id}: already moved past the recorded pause ({pause_kind}/{stage}) on an earlier "
+            f"attempt -- now at a new pause ({status.pause_kind}/{status.stage}); not re-applying {decision!r}."
+        )
+    # else: status.paused is False -- the run already ran all the way
+    # to a real completion on an earlier, partially-crashed attempt
+    # (decision applied, everything since succeeded before whatever
+    # crashed this process). `drive()` below sees a non-paused status
+    # and returns immediately with the real outcome -- nothing further
+    # to do.
 
     def _async_resolve(status: Any, env: Environment) -> None:
         on_pause(status, env)

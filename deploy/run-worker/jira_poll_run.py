@@ -287,11 +287,28 @@ def _check_pending_decisions() -> None:
             continue
 
         print(f"[jira_poll] {issue_key}: real decision {decision!r} found -- resuming run {record['run_id']!r}.")
-        outcome = resume_paused_run_async(
-            run_id=record["run_id"], real_jira_key=issue_key, task_description=record["task_description"],
-            branch_name=record["branch_name"], worktree_path=record["worktree_path"],
-            decision=decision, on_pause=on_pause,
-        )
+        try:
+            outcome = resume_paused_run_async(
+                run_id=record["run_id"], real_jira_key=issue_key, task_description=record["task_description"],
+                branch_name=record["branch_name"], worktree_path=record["worktree_path"],
+                pause_kind=record["pause_kind"], stage=record["stage"],
+                decision=decision, on_pause=on_pause,
+            )
+        except Exception as exc:
+            # Real resilience fix: a real, transient infrastructure
+            # failure (a Bedrock timeout that exhausts its own retries,
+            # a GitHub outage, ...) must never crash this whole process
+            # -- that would silently stop checking every OTHER pending
+            # story too, not just this one. The pending record is left
+            # untouched (this `except` runs before anything below that
+            # would clear/advance it), so the next poll tick naturally
+            # retries this exact same resume attempt from the run's
+            # real, durable state -- see resume_paused_run_async's own
+            # docstring for why it's now safe to retry without
+            # double-applying the decision.
+            print(f"[jira_poll] {issue_key}: resuming run {record['run_id']!r} failed with a real error ({exc!r}); will retry on the next poll.")
+            continue
+
         if outcome.paused:
             continue  # on_pause already refreshed this issue's pending record for the new stage
 
@@ -366,7 +383,28 @@ def _poll_once() -> bool:
         bot_account_id = whoami["data"]["account_id"] if whoami.get("outcome") == "ok" else None
         on_pause = _make_on_pause(jira_client, assignee_account_id=bot_account_id)
 
-        outcome = start_run_async(task_description=task_description, real_jira_key=issue_key, on_pause=on_pause)
+        try:
+            outcome = start_run_async(task_description=task_description, real_jira_key=issue_key, on_pause=on_pause)
+        except Exception as exc:
+            # Real resilience fix, same reasoning as _check_pending_
+            # decisions' own try/except: a real transient failure (e.g.
+            # a Bedrock timeout exhausting its own retries) before the
+            # run ever reached its first pause must not crash this
+            # whole process, and must not leave the story silently
+            # stuck with no explanation -- it already left
+            # JIRA_TRIGGER_STATUS, so a later poll's search will never
+            # find it again on its own.
+            print(f"[jira_poll] {issue_key}: starting a real run failed with a real error ({exc!r}).")
+            jira_client.post_comment(
+                issue_key=issue_key,
+                body=(
+                    f"SDLC Auto hit a real error starting this run and could not continue: {exc}. "
+                    f"Move this story back to {config.trigger_status!r} (with the {config.opt_in_label!r} "
+                    "label still applied) to retry from scratch."
+                ),
+                comment_type="general",
+            )
+            return True
 
         if outcome.paused:
             print(f"[jira_poll] {issue_key}: run paused, waiting for your reply comment (see the issue).")
