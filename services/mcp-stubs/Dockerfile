@@ -23,7 +23,7 @@
 #
 # Build context: the repo root (see docker-compose.yml).
 
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app/services/mcp-stubs
 COPY services/mcp-stubs/ /app/services/mcp-stubs/
