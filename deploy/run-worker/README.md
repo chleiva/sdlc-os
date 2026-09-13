@@ -11,7 +11,7 @@ Docker Compose service:
   looks like instead).
 
 Both share the exact same real orchestrator wiring, factored into
-`_run_lib.py`'s `run_once()` so the two never silently drift apart.
+`_run_lib.py` so the two never silently drift apart.
 
 ## What this actually does, for real
 
@@ -27,13 +27,40 @@ Both share the exact same real orchestrator wiring, factored into
    the real worktree. Five of Section 11.1's seven layers are honestly
    reported as `skipped — not implemented in this pass` (see that
    module's own docstring for exactly which, and why).
-4. A real terminal-based approval gate at both Section 9 human gates.
+4. A real approval gate at both Section 9 human gates -- `live_run.py`'s
+   is a terminal prompt (a human is right there); `jira_poll_run.py`'s
+   is asynchronous: a real Jira comment + real assignment, never a
+   blocking prompt (see "Async human-in-the-loop" below).
 5. A real `git push` + a real PR via `SourceControlService.open_pr`.
 6. (`jira_poll_run.py` only) A real `JiraClient.find_stories_in_status`
    JQL search, a real `gating.evaluate` opt-in check (never "in the
-   trigger status" alone — master spec Sec. 4.4), and a real
-   `post_comment` back to the Jira issue reporting the outcome (PR URL,
-   or why the run was abandoned).
+   trigger status" alone — master spec Sec. 4.4).
+
+## Async human-in-the-loop (`jira_poll_run.py` only)
+
+An automatically-triggered run cannot block on a terminal prompt --
+nobody is watching one. So every gate/checkpoint pause instead:
+
+1. Posts a real Jira comment describing exactly what's needed (the
+   plan summary, or the checkpoint reason) and the exact word to reply
+   with.
+2. Real-assigns the issue to the account behind your configured Jira
+   token (`JiraClient.assign_issue`).
+3. Persists everything needed to resume this exact run later
+   (`data/jira_pending_decisions.json`) and exits -- nothing is
+   blocked.
+
+Reply with a plain comment containing exactly one word: **`approve`**
+or **`reject`** for a plan/change-review gate; **`continue`** or
+**`stop`** for a Section 9.3 checkpoint (case-insensitive; a few
+synonyms like `yes`/`lgtm`/`no` also work -- see `jira_poll_run
+._POSITIVE_WORDS`/`_NEGATIVE_WORDS`). The next `jira_poll_run.py`
+invocation (or the next `--watch` tick) checks every pending story for
+a new reply from a real human (never mistaking its own notification
+comment for one), and resumes that exact run with your decision
+applied via `orchestrator.approve_plan`/`approve_change_review`/
+`resolve_checkpoint` -- which may pause again (another comment,
+another wait) or finish for real.
 
 ## What's still a deliberate simplification, stated plainly
 
@@ -49,6 +76,19 @@ Both share the exact same real orchestrator wiring, factored into
   prose) — `_run_lib.run_once`'s own docstring explains why. Giving
   `Run`/`_run_context` an actual dedicated task-description field is
   still a real, disclosed gap, not fixed by this.
+- **Jira comments only, no Slack yet.** The async human-in-the-loop
+  mechanism above is deliberately Jira-only for now — a real Slack
+  notification (faster to notice than a Jira comment) would be a
+  genuinely separate integration (a Slack app, Events API, interactive
+  buttons), layered on top of this same mechanism as a second
+  notification channel, not built here.
+- **A run started before this async mechanism existed stays stuck.**
+  If you have an old, abandoned run sitting mid-way (an issue moved to
+  `JIRA_APPROVAL_STATUS` with no further comment, and no entry in
+  `data/jira_pending_decisions.json`) — it predates this fix and isn't
+  picked up retroactively; its worktree/branch are still on disk under
+  `mirrors/` if you want to finish it by hand, or just leave it and
+  move the Jira issue back to `JIRA_TRIGGER_STATUS` to start fresh.
 - **Polling, not a push webhook.** See `jira_poll_run.py`'s own
   docstring for the full reasoning: the real production path (Jira
   Automation → signed webhook relay → `job-dispatcher` →

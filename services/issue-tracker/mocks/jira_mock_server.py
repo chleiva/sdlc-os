@@ -52,6 +52,8 @@ class MockIssue:
     issuelinks: list[dict[str, Any]] = field(default_factory=list)
     comments: list[dict[str, Any]] = field(default_factory=list)
     archived: bool = False
+    # (New) real-assignment target -- see JiraClient.assign_issue.
+    assignee_account_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         fields: dict[str, Any] = {
@@ -83,6 +85,15 @@ class JiraMockStore:
         # limiting / upstream-unavailable / permission simulation).
         self.force_status: dict[str, int] = {}
         self.force_retry_after: int | None = None
+        # (New) the mock's own bot identity -- what GET /myself returns,
+        # and the author every comment posted via POST /comment (i.e.
+        # through JiraClient.post_comment, the API caller's own identity
+        # in real Jira) is attributed to. A test injecting a simulated
+        # *human* reply appends directly to `issue.comments` with a
+        # different accountId instead of going through `post_comment`.
+        self.bot_account_id = "712020:mock-bot-account-id"
+        self.bot_display_name = "SDLC Auto (mock)"
+        self.bot_email = "bot@example.com"
 
     def seed(self, issue: MockIssue) -> MockIssue:
         with self._lock:
@@ -169,12 +180,28 @@ def make_handler(store: JiraMockStore):
             if self._maybe_force():
                 return
             path = self.path.split("?")[0]
+            if path == "/rest/api/3/myself":
+                self._whoami()
+                return
             m = _ISSUE_KEY_RE.match(path)
             if m and m.group(2) in (None, ""):
                 self._get_issue(m.group(1))
                 return
             if m and m.group(2) == "/transitions":
                 self._get_transitions(m.group(1))
+                return
+            if m and m.group(2) == "/comment":
+                self._list_comments(m.group(1))
+                return
+            self._send(404, {"errorMessages": ["No such resource."]})
+
+        def do_PUT(self):  # noqa: N802
+            if self._maybe_force():
+                return
+            path = self.path.split("?")[0]
+            m = _ISSUE_KEY_RE.match(path)
+            if m and m.group(2) == "/assignee":
+                self._assign_issue(m.group(1))
                 return
             self._send(404, {"errorMessages": ["No such resource."]})
 
@@ -290,9 +317,37 @@ def make_handler(store: JiraMockStore):
                 return
             body = _read_json(self)
             comment_id = store.next_comment_id()
-            comment = {"id": comment_id, "body": body.get("body"), "created": "2026-09-12T10:00:00.000+0000"}
+            comment = {
+                "id": comment_id,
+                "body": body.get("body"),
+                "created": "2026-09-12T10:00:00.000+0000",
+                "author": {"accountId": store.bot_account_id},
+            }
             issue.comments.append(comment)
             self._send(201, comment)
+
+        def _list_comments(self, key: str) -> None:
+            issue = store.get(key)
+            if issue is None:
+                self._send(404, {"errorMessages": [f"Issue does not exist: {key}"]})
+                return
+            self._send(200, {"startAt": 0, "maxResults": 100, "total": len(issue.comments), "comments": issue.comments})
+
+        def _whoami(self) -> None:
+            self._send(200, {
+                "accountId": store.bot_account_id,
+                "displayName": store.bot_display_name,
+                "emailAddress": store.bot_email,
+            })
+
+        def _assign_issue(self, key: str) -> None:
+            issue = store.get(key)
+            if issue is None:
+                self._send(404, {"errorMessages": [f"Issue does not exist: {key}"]})
+                return
+            body = _read_json(self)
+            issue.assignee_account_id = body.get("accountId")
+            self._send(204)
 
     return Handler
 

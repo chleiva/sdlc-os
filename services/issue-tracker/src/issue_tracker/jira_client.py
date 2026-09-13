@@ -345,6 +345,69 @@ class JiraClient:
         except IssueTrackerError as exc:
             return self._error_result(exc)
 
+    # -- whoami / assign-issue / list-comments (New: the async human-in-the-
+    # loop path for an unattended/automatic trigger -- see
+    # deploy/run-worker/jira_poll_run.py's module docstring. A run that
+    # pauses for a human decision cannot block on a terminal prompt when
+    # nothing started it interactively; it instead posts a real comment,
+    # assigns the issue to a real person, and a later poll looks for their
+    # reply comment instead.) ------------------------------------------
+
+    def whoami(self) -> dict[str, Any]:
+        """GET /rest/api/3/myself -- the real Atlassian account this
+        client's own credentials belong to. Used to (a) know who to
+        assign a paused run's issue to (this tool's own single-user
+        assumption: whoever the configured token belongs to), and (b)
+        recognize the bot's own comments so a later scan for a human's
+        reply never mistakes its own notification for a decision."""
+        try:
+            resp = self._request("GET", "/rest/api/3/myself")
+            body = resp.json()
+            return Result.ok({
+                "account_id": body["accountId"],
+                "display_name": body.get("displayName", ""),
+                "email_address": body.get("emailAddress", ""),
+            }).to_wire()
+        except IssueTrackerError as exc:
+            return self._error_result(exc)
+
+    def assign_issue(self, *, issue_key: str, account_id: str) -> dict[str, Any]:
+        """PUT /rest/api/3/issue/{key}/assignee -- real Jira Cloud
+        assignment by accountId (the only supported identifier post-GDPR;
+        see Atlassian's own migration off username-based assignment)."""
+        try:
+            self._request(
+                "PUT",
+                f"/rest/api/3/issue/{issue_key}/assignee",
+                json_body={"accountId": account_id},
+            )
+            return Result.ok({"issue_key": issue_key, "account_id": account_id}).to_wire()
+        except IssueTrackerError as exc:
+            return self._error_result(exc)
+
+    def list_comments(self, *, issue_key: str) -> dict[str, Any]:
+        """GET /rest/api/3/issue/{key}/comment -- every comment on the
+        issue, oldest first (matches Jira's own default ordering),
+        ADF bodies converted to plain text (`adf.adf_to_text`, the same
+        helper `get_issue` already uses for descriptions) so a caller
+        can match a human's reply against a plain-word vocabulary
+        without doing its own ADF parsing."""
+        try:
+            resp = self._request("GET", f"/rest/api/3/issue/{issue_key}/comment")
+            body = resp.json()
+            comments = [
+                {
+                    "comment_id": str(c["id"]),
+                    "author_account_id": c.get("author", {}).get("accountId", ""),
+                    "body": adf.adf_to_text(c.get("body")),
+                    "created_at": c.get("created", ""),
+                }
+                for c in body.get("comments", [])
+            ]
+            return Result.ok({"comments": comments}).to_wire()
+        except IssueTrackerError as exc:
+            return self._error_result(exc)
+
     # -- find-stories-in-status (New: the polling-based trigger path) ------
 
     def find_stories_in_status(self, *, project_key: str, status: str) -> dict[str, Any]:

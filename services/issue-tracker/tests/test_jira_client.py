@@ -162,6 +162,57 @@ def test_post_comment_with_blank_body_is_empty_result(jira_client):
     assert "empty" in result["reason"]
 
 
+def test_whoami_returns_the_real_authenticated_account(jira_client, jira_mock):
+    _base_url, store = jira_mock
+    result = jira_client.whoami()
+    assert result["outcome"] == "ok"
+    assert result["data"]["account_id"] == store.bot_account_id
+    assert result["data"]["display_name"] == store.bot_display_name
+
+
+def test_assign_issue_sets_the_real_assignee(jira_client, jira_mock):
+    _base_url, store = jira_mock
+    epic = jira_client.create_epic(
+        project_key="PROJ", summary="Assign test epic", description="d", acceptance_criteria=["ac"],
+    )
+    key = epic["data"]["issue_key"]
+
+    result = jira_client.assign_issue(issue_key=key, account_id="712020:some-human-account")
+    assert result["outcome"] == "ok"
+    assert store.get(key).assignee_account_id == "712020:some-human-account"
+
+
+def test_list_comments_returns_them_with_author_and_plain_text_body(jira_client, jira_mock):
+    _base_url, store = jira_mock
+    epic = jira_client.create_epic(
+        project_key="PROJ", summary="List comments test epic", description="d", acceptance_criteria=["ac"],
+    )
+    key = epic["data"]["issue_key"]
+    jira_client.post_comment(issue_key=key, body="picked up, starting a real run", comment_type="general")
+
+    result = jira_client.list_comments(issue_key=key)
+    assert result["outcome"] == "ok"
+    comments = result["data"]["comments"]
+    assert len(comments) == 1
+    assert comments[0]["body"] == "picked up, starting a real run"
+    # Attributed to the same bot identity whoami() reports -- proves a
+    # caller can tell its own notification comments apart from a human's
+    # reply without any extra bookkeeping.
+    assert comments[0]["author_account_id"] == store.bot_account_id
+
+    # A simulated human reply (posted directly into the mock's store,
+    # the same way a real person replying in the Jira UI never goes
+    # through this client's own post_comment): a real different author.
+    store.get(key).comments.append(
+        {"id": "9999", "author": {"accountId": "712020:a-real-human"}, "body": {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": "approve"}]}]}, "created": "2026-09-13T00:00:00.000+0000"}
+    )
+    result2 = jira_client.list_comments(issue_key=key)
+    comments2 = result2["data"]["comments"]
+    assert len(comments2) == 2
+    assert comments2[1]["author_account_id"] == "712020:a-real-human"
+    assert comments2[1]["body"] == "approve"
+
+
 def test_find_stories_in_status_returns_matching_candidates(jira_client):
     """The polling-based trigger path's own query (New): every issue
     created here starts in the mock's default status ("Selected for

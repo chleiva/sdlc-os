@@ -9,20 +9,38 @@ GitHub App JWT + installation-token exchange, a real mirror clone/
 fetch, a real `git worktree`-isolated branch, a real `git push` and PR;
 a real Bedrock/MiniMax M2.5 planning call and a real, multi-turn,
 tool-using implementation loop that actually writes files; a real
-`RealVerificationRunner`; a real terminal-based human gate at both
-Section 9 gates (see `live_run.py`'s own original docstring for why
-`GatesService`'s real approver-resolution isn't wired here yet).
+`RealVerificationRunner`.
+
+**Real gap this file closes (New): a pause can no longer assume someone
+is at a keyboard.** Originally every pause (a Section 9 gate, or a
+Section 9.3 checkpoint) was resolved by blocking on a terminal `input()`
+call -- fine for `live_run.py`, where a human is deliberately sitting
+there having just typed the command, but structurally broken for
+`jira_poll_run.py`'s whole point (an unattended, automatically-triggered
+run: nobody is watching a terminal for it). `core.py`'s own state
+machine was never the problem -- a paused run is already durably saved
+and resumable later, from a different process, via `resume_run`
+(`test_durable_resume.py` proves this). The fix is entirely in this
+module: `drive()` takes a pluggable `resolve` callback instead of a
+hardcoded `input()` loop. `_interactive_resolve` (used by `run_once`,
+i.e. `live_run.py`) is the original terminal-prompt behavior, unchanged.
+`jira_poll_run.py` instead passes a resolver that posts a real Jira
+comment + a real assignment (never blocks) and returns `None` --
+`drive()` then stops and hands back a `RunOutcome` with `paused=True`
+plus everything (`run_id`, `branch_name`, `worktree_path`) a later,
+separate invocation needs to resume the *same* run once a human replies
+with a comment (see `resume_paused_run_async` and `jira_poll_run.py`).
 
 **`jira_key` field, honestly**: `core.py`'s `start_run`/`_run_context`
 have exactly one free-text field (`jira_key`) -- there is no separate
 task-description field in the Registry's `Run` model at all (a real,
 disclosed gap, not something this module invents a workaround around
-silently). `run_once` below embeds `real_jira_key` (when the caller has
-one -- `jira_poll_run.py` does, `live_run.py`'s plain CLI usage doesn't)
-as a `"<KEY>: <task text>"` prefix, so a Jira-triggered run's real issue
-key stays inspectable in the Registry rather than being replaced
-entirely by prose, while a manually-typed task still works exactly as
-before.
+silently). `_build_environment` embeds `real_jira_key` (when the caller
+has one -- `jira_poll_run.py` does, `live_run.py`'s plain CLI usage
+doesn't) as a `"<KEY>: <task text>"` prefix, so a Jira-triggered run's
+real issue key stays inspectable in the Registry rather than being
+replaced entirely by prose, while a manually-typed task still works
+exactly as before.
 """
 
 from __future__ import annotations
@@ -31,8 +49,9 @@ import os
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -83,19 +102,82 @@ def confirm(prompt: str) -> bool:
 class RunOutcome:
     """What actually happened, for a caller (`jira_poll_run.py`) that
     wants to report the real outcome back to Jira -- `live_run.py` only
-    needs `.exit_code`."""
+    needs `.exit_code`.
+
+    `exit_code`: 0 = finished cleanly (see `pr_url`/`final_stage`),
+    1 = a gate/checkpoint was resolved negatively (rejected/stopped),
+    2 = still paused, no decision was made yet (`resolve` returned
+    `None` -- the async path; never happens for the interactive path,
+    since `_interactive_resolve` always returns a real decision)."""
 
     exit_code: int
     run_id: str | None = None
     final_stage: str | None = None
     pr_url: str | None = None
+    paused: bool = False
+    pause_kind: str | None = None
 
 
-def run_once(*, task_description: str, real_jira_key: str | None = None) -> RunOutcome:
-    """Build a real Orchestrator for one task, start a real run, and
-    drive it to completion through the terminal-based gates -- the
-    exact logic `live_run.py`'s `main()` originally had, unchanged in
-    behavior, now shared with `jira_poll_run.py`."""
+@dataclass
+class Environment:
+    """Everything one real run needs, built once by `_build_environment`
+    and threaded through `drive()` -- a resolver reads `plan_store`/
+    `checkpoint` details off of it to describe a pause; `resume_paused_
+    run_async` rebuilds one of these pointed at an *existing* branch/
+    worktree instead of creating a new one."""
+
+    orchestrator: Any
+    plan_store: Any
+    branch_name: str
+    worktree_path: Path
+    tenant_id: str
+    repository: str
+    task_description: str
+    real_jira_key: str | None
+    jira_key_field: str
+    outcome_state: dict = field(default_factory=lambda: {"pr_url": None})
+
+
+# A resolver is called once per pause, and returns the decision string to
+# apply ("approve"/"reject" for a gate, "continue"/"stop" for a
+# checkpoint) -- or `None` to mean "no decision available right now,
+# stop driving" (the async path).
+Resolver = Callable[[Any, Environment], "str | None"]
+
+
+def _interactive_resolve(status: Any, env: Environment) -> str | None:
+    """The original `live_run.py` terminal-prompt behavior, unchanged:
+    a human is assumed to be right there, so this always returns a real
+    decision, never `None`."""
+    if status.pause_kind == "gate":
+        if status.stage == "plan_approval_gate":
+            artifact = env.plan_store.load_latest(status.run_id)
+            print("\n=== REAL PLAN, awaiting your real approval ===")
+            print(f"outcomes: {artifact.get('outcomes')}")
+            print(f"story_size: {artifact.get('risk', {}).get('story_size')}")
+            print(f"subtasks: {[s['description'] for s in artifact.get('subtask_graph', {}).get('subtasks', [])]}")
+            return "approve" if confirm("Approve this plan?") else "reject"
+        if status.stage == "change_review_gate":
+            print("\n=== REAL CHANGE, verification passed, awaiting your real review ===")
+            return "approve" if confirm("Approve this change for packaging (real PR)?") else "reject"
+        raise SystemExit(f"unexpected gate stage {status.stage!r}")
+    if status.pause_kind == "checkpoint":
+        elicitation = status.checkpoint
+        print(f"\n=== REAL CHECKPOINT ({elicitation.trigger}) === {elicitation.reason}")
+        return "continue" if confirm("Continue?") else "stop"
+    raise SystemExit(f"unexpected pause_kind {status.pause_kind!r}")
+
+
+def _build_environment(
+    *, task_description: str, real_jira_key: str | None = None,
+    branch_name: str | None = None, worktree_path: Path | None = None,
+) -> Environment:
+    """Build a real `Orchestrator` + everything it needs. If `branch_name`/
+    `worktree_path` are both given, reuses that *existing* branch/worktree
+    (a resumed run continuing after a human's decision) instead of
+    cloning the mirror and creating a new one -- the old worktree from
+    the run's first invocation is still there on disk; nothing cleans it
+    up, and nothing should re-clone/re-branch on top of it."""
     load_dotenv(REPO_ROOT / ".env")
 
     github_app_id = require_env("GITHUB_APP_ID")
@@ -123,7 +205,7 @@ def run_once(*, task_description: str, real_jira_key: str | None = None) -> RunO
     from source_control.git_ops import build_authenticated_remote_url, clone_or_update_mirror
     from source_control.service import InstallationRegistry, SourceControlService, TenantInstallation
 
-    from orchestrator.core import Elicitation, Orchestrator, OrchestratorError
+    from orchestrator.core import Orchestrator, OrchestratorError
     from orchestrator.plan_artifact import PlanArtifactStore
     from orchestrator.progress import RunProgressStore
     from orchestrator.real_verification_runner import RealVerificationRunner
@@ -158,20 +240,23 @@ def run_once(*, task_description: str, real_jira_key: str | None = None) -> RunO
         token = token_cache.get_token(github_installation_id, tenant_id=tenant_id)
         return build_authenticated_remote_url(f"https://github.com/{repository}.git", token.token)
 
-    print(f"[run] Ensuring real local mirror of {repository} at {mirror_path} ...")
-    clone_or_update_mirror(remote_url=_authenticated_remote_url(), local_path=mirror_path)
+    reusing = branch_name is not None and worktree_path is not None
+    if reusing:
+        print(f"[run] Reusing existing branch+worktree {branch_name!r} at {worktree_path}")
+    else:
+        print(f"[run] Ensuring real local mirror of {repository} at {mirror_path} ...")
+        clone_or_update_mirror(remote_url=_authenticated_remote_url(), local_path=mirror_path)
 
-    # -- Real branch + real git-worktree isolation ---------------------------
-    branch_name = f"sdlc-auto/live-run-{uuid.uuid4().hex[:8]}"
-    session_id = str(uuid.uuid4())
-    print(f"[run] Creating real branch+worktree {branch_name!r} ...")
-    worktree_result = source_control_service.create_branch_worktree(
-        tenant_id=tenant_id, repository=repository, base_ref="main", branch_name=branch_name, session_id=session_id,
-    )
-    if worktree_result.get("outcome") != "ok":
-        raise SystemExit(f"create_branch_worktree failed: {worktree_result}")
-    worktree_path = Path(worktree_result["data"]["worktree_path"])
-    print(f"[run] Real worktree ready at {worktree_path}")
+        branch_name = f"sdlc-auto/live-run-{uuid.uuid4().hex[:8]}"
+        session_id = str(uuid.uuid4())
+        print(f"[run] Creating real branch+worktree {branch_name!r} ...")
+        worktree_result = source_control_service.create_branch_worktree(
+            tenant_id=tenant_id, repository=repository, base_ref="main", branch_name=branch_name, session_id=session_id,
+        )
+        if worktree_result.get("outcome") != "ok":
+            raise SystemExit(f"create_branch_worktree failed: {worktree_result}")
+        worktree_path = Path(worktree_result["data"]["worktree_path"])
+        print(f"[run] Real worktree ready at {worktree_path}")
 
     # -- Real Bedrock client + the real tool-using implementation backend ---
     bedrock_client = boto3.client("bedrock-runtime", region_name=aws_region)
@@ -195,7 +280,7 @@ def run_once(*, task_description: str, real_jira_key: str | None = None) -> RunO
 
     outcome_state: dict = {"pr_url": None}
 
-    def _packaging_fn(orchestrator: Orchestrator, run, tool_invoker) -> None:
+    def _packaging_fn(orchestrator: Any, run: Any, tool_invoker: Any) -> None:
         """Runs at the real PACKAGING stage (core.py's own extension
         point, unmodified): push the real branch, open a real PR."""
         print(f"[run] Pushing real branch {branch_name!r} to GitHub ...")
@@ -242,46 +327,118 @@ def run_once(*, task_description: str, real_jira_key: str | None = None) -> RunO
     # this way: it is the Registry's only free-text field today.
     jira_key_field = f"{real_jira_key}: {task_description}" if real_jira_key else task_description
 
-    print(f"[run] Starting a real run for task: {task_description!r}")
-    status = orchestrator.start_run(
-        jira_key=jira_key_field, repo=repository, branch=branch_name, trace_id=str(uuid.uuid4()),
+    return Environment(
+        orchestrator=orchestrator,
+        plan_store=plan_store,
+        branch_name=branch_name,
+        worktree_path=worktree_path,
+        tenant_id=tenant_id,
+        repository=repository,
+        task_description=task_description,
+        real_jira_key=real_jira_key,
+        jira_key_field=jira_key_field,
+        outcome_state=outcome_state,
     )
 
+
+def drive(env: Environment, status: Any, *, resolve: Resolver) -> RunOutcome:
+    """The one real pause-handling loop, shared by every caller. Calls
+    `resolve(status, env)` once per pause: a real decision string keeps
+    driving; `None` stops immediately and returns a `paused=True`
+    outcome carrying everything (`run_id`, `env.branch_name`,
+    `env.worktree_path`) needed to resume this exact run later."""
     while status.paused:
+        decision = resolve(status, env)
+        if decision is None:
+            return RunOutcome(exit_code=2, run_id=status.run_id, final_stage=status.stage, paused=True, pause_kind=status.pause_kind)
+
         if status.pause_kind == "gate":
             if status.stage == "plan_approval_gate":
-                artifact = plan_store.load_latest(status.run_id)
-                print("\n=== REAL PLAN, awaiting your real approval ===")
-                print(f"outcomes: {artifact.get('outcomes')}")
-                print(f"story_size: {artifact.get('risk', {}).get('story_size')}")
-                print(f"subtasks: {[s['description'] for s in artifact.get('subtask_graph', {}).get('subtasks', [])]}")
-                if confirm("Approve this plan?"):
-                    status = orchestrator.approve_plan(status.run_id, decision="approve")
-                else:
-                    status = orchestrator.approve_plan(status.run_id, decision="reject")
-                    print("[run] Plan rejected; run abandoned.")
-                    return RunOutcome(exit_code=1, run_id=status.run_id, final_stage=status.stage)
+                status = env.orchestrator.approve_plan(status.run_id, decision=decision)
             elif status.stage == "change_review_gate":
-                print("\n=== REAL CHANGE, verification passed, awaiting your real review ===")
-                if confirm("Approve this change for packaging (real PR)?"):
-                    status = orchestrator.approve_change_review(status.run_id, decision="approve")
-                else:
-                    status = orchestrator.approve_change_review(status.run_id, decision="reject")
-                    print("[run] Change rejected; run abandoned.")
-                    return RunOutcome(exit_code=1, run_id=status.run_id, final_stage=status.stage)
+                status = env.orchestrator.approve_change_review(status.run_id, decision=decision)
             else:
                 raise SystemExit(f"unexpected gate stage {status.stage!r}")
         elif status.pause_kind == "checkpoint":
-            elicitation: Elicitation = status.checkpoint
-            print(f"\n=== REAL CHECKPOINT ({elicitation.trigger}) === {elicitation.reason}")
-            if confirm("Continue?"):
-                status = orchestrator.resolve_checkpoint(status.run_id, decision="continue")
-            else:
-                status = orchestrator.resolve_checkpoint(status.run_id, decision="stop")
-                print("[run] Checkpoint not cleared; run abandoned.")
-                return RunOutcome(exit_code=1, run_id=status.run_id, final_stage=status.stage)
+            status = env.orchestrator.resolve_checkpoint(status.run_id, decision=decision)
         else:
             raise SystemExit(f"unexpected pause_kind {status.pause_kind!r}")
 
+        if decision in ("reject", "stop"):
+            print(f"[run] Run abandoned (decision={decision!r}).")
+            return RunOutcome(exit_code=1, run_id=status.run_id, final_stage=status.stage)
+
     print(f"\n[run] Run finished at stage: {status.stage}")
-    return RunOutcome(exit_code=0, run_id=status.run_id, final_stage=status.stage, pr_url=outcome_state["pr_url"])
+    return RunOutcome(exit_code=0, run_id=status.run_id, final_stage=status.stage, pr_url=env.outcome_state["pr_url"])
+
+
+def run_once(*, task_description: str, real_jira_key: str | None = None) -> RunOutcome:
+    """`live_run.py`'s entrypoint: build a fresh environment, start a
+    real run, and drive it to completion through the interactive
+    terminal gates -- unchanged behavior from before this module split
+    `drive()` out."""
+    env = _build_environment(task_description=task_description, real_jira_key=real_jira_key)
+    print(f"[run] Starting a real run for task: {task_description!r}")
+    status = env.orchestrator.start_run(
+        jira_key=env.jira_key_field, repo=env.repository, branch=env.branch_name, trace_id=str(uuid.uuid4()),
+    )
+    return drive(env, status, resolve=_interactive_resolve)
+
+
+def start_run_async(*, task_description: str, real_jira_key: str, on_pause: Callable[[Any, Environment], None]) -> RunOutcome:
+    """`jira_poll_run.py`'s entrypoint for a newly-picked-up story: build
+    a fresh environment, start a real run, and drive it -- but every
+    pause calls `on_pause(status, env)` (real side effects: notify Jira)
+    and then always stops (never blocks on `input()`)."""
+    env = _build_environment(task_description=task_description, real_jira_key=real_jira_key)
+    print(f"[run] Starting a real run for task: {task_description!r}")
+    status = env.orchestrator.start_run(
+        jira_key=env.jira_key_field, repo=env.repository, branch=env.branch_name, trace_id=str(uuid.uuid4()),
+    )
+
+    def _async_resolve(status: Any, env: Environment) -> None:
+        on_pause(status, env)
+        return None
+
+    return drive(env, status, resolve=_async_resolve)
+
+
+def resume_paused_run_async(
+    *, run_id: str, real_jira_key: str, task_description: str, branch_name: str, worktree_path: str,
+    decision: str, on_pause: Callable[[Any, Environment], None],
+) -> RunOutcome:
+    """`jira_poll_run.py`'s entrypoint once a human has replied on the
+    paused issue: rebuild the environment pointed at the *same*
+    branch/worktree the original invocation used, apply `decision` to
+    whichever pause the run is actually sitting at (read from the
+    Registry via `resume_run`, not assumed), then keep driving with the
+    same async, never-blocking resolver as `start_run_async`."""
+    env = _build_environment(
+        task_description=task_description, real_jira_key=real_jira_key,
+        branch_name=branch_name, worktree_path=Path(worktree_path),
+    )
+    status = env.orchestrator.resume_run(run_id)
+    if not status.paused:
+        raise SystemExit(f"resume_paused_run_async: run {run_id!r} is not paused (stage={status.stage!r}) -- nothing to apply a decision to")
+
+    if status.pause_kind == "gate":
+        if status.stage == "plan_approval_gate":
+            status = env.orchestrator.approve_plan(run_id, decision=decision)
+        elif status.stage == "change_review_gate":
+            status = env.orchestrator.approve_change_review(run_id, decision=decision)
+        else:
+            raise SystemExit(f"unexpected gate stage {status.stage!r}")
+    elif status.pause_kind == "checkpoint":
+        status = env.orchestrator.resolve_checkpoint(run_id, decision=decision)
+    else:
+        raise SystemExit(f"unexpected pause_kind {status.pause_kind!r}")
+
+    if decision in ("reject", "stop"):
+        print(f"[run] Run abandoned (decision={decision!r}).")
+        return RunOutcome(exit_code=1, run_id=status.run_id, final_stage=status.stage)
+
+    def _async_resolve(status: Any, env: Environment) -> None:
+        on_pause(status, env)
+        return None
+
+    return drive(env, status, resolve=_async_resolve)
