@@ -351,7 +351,22 @@ class Orchestrator:
         self.plan_store.save(artifact)
 
     def _run_context(self, run: Run) -> dict:
-        return {"run_id": run.id, "tenant_id": run.tenant_id, "jira_key": run.jira_key, "repo": run.repo, "stage": run.stage}
+        # story_size added (additive -- every existing key/consumer is
+        # unchanged) so an AgentBackend can size its own internal
+        # resource budgets (e.g. BedrockToolUseAgentBackend's per-subtask
+        # tool-calling turn cap) against the plan's own declared Sec. 9.4
+        # budget instead of one flat constant for every size. None before
+        # a plan exists yet (PLAN_AUTHORING) or if story_size is missing.
+        artifact = self.plan_store.load_latest(run.id) or {}
+        story_size = artifact.get("risk", {}).get("story_size")
+        return {
+            "run_id": run.id,
+            "tenant_id": run.tenant_id,
+            "jira_key": run.jira_key,
+            "repo": run.repo,
+            "stage": run.stage,
+            "story_size": story_size,
+        }
 
     # ------------------------------------------------------------------
     # The drive loop

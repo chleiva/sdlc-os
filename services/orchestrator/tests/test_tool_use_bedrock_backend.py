@@ -1,0 +1,154 @@
+"""Tests for `orchestrator.tool_use_bedrock_backend.BedrockToolUseAgentBackend`
+against a hand-built fake `bedrock-runtime` client (`tests/fake_bedrock_client.py`,
+the same one `test_bedrock_backend.py` uses) and a real local git repo
+(`git_fixture_repo`) -- no network access, no real AWS account, no real
+model weights.
+
+Real gap this file closes: this class -- the one that actually writes
+real files to a real worktree and computes a real `git diff` -- had zero
+committed test coverage before this. Every other real integration in
+this repo (`bedrock_backend.py`, `source_control`, ...) is validated
+against a committed fake/mock; this one had only been exercised through
+manual, uncommitted live-run smoke testing. That gap is exactly why the
+turn-budget bugs surfaced only on a real live run instead of in CI.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from orchestrator.checkpoints import DEFAULT_BUDGETS
+from orchestrator.bedrock_backend import BedrockBackendConfig
+from orchestrator.model_backend import SubTask
+from orchestrator.tool_use_bedrock_backend import (
+    BedrockAgenticLoopExhaustedError,
+    BedrockToolUseAgentBackend,
+    _max_turns_for_story_size,
+)
+from tests.fake_bedrock_client import FakeBedrockRuntimeClient, converse_response_with_tool_call
+
+_FAKE_MODEL_ID = "minimax.m2-5-v1:0"
+
+
+@pytest.fixture
+def fake_client():
+    return FakeBedrockRuntimeClient()
+
+
+@pytest.fixture
+def backend(fake_client, git_fixture_repo):
+    return BedrockToolUseAgentBackend(
+        BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1"),
+        fake_client,
+        workspace_root=git_fixture_repo,
+    )
+
+
+def test_implement_subtask_writes_a_real_file_and_reports_a_real_diff(backend, fake_client, git_fixture_repo):
+    """The full real loop: one write_file turn, then finish -- the
+    returned DiffOutput must reflect what is REALLY on disk (a real
+    `git diff`/`git status`), never the model's own self-report."""
+    fake_client.queue_response(
+        converse_response_with_tool_call("write_file", {"path": "hello.py", "content": "def greet(name):\n    return f'Hello, {name}!'\n"})
+    )
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add greet()", "summary": "added hello.py"}))
+
+    diff = backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="add hello.py", parallel_group=None, depends_on=()),
+    )
+
+    assert diff.files_touched == ("hello.py",)
+    assert diff.commit_message == "add greet()"
+    assert (git_fixture_repo / "hello.py").read_text() == "def greet(name):\n    return f'Hello, {name}!'\n"
+    assert diff.lines_changed >= 1
+
+
+def test_read_then_write_then_finish_is_a_real_multi_turn_loop(backend, fake_client, git_fixture_repo):
+    """Proves this is a genuine multi-turn loop (not a single call):
+    read_file first (of a file that already exists from the fixture's
+    own initial commit), then write_file, then finish."""
+    fake_client.queue_response(converse_response_with_tool_call("read_file", {"path": "README.md"}))
+    fake_client.queue_response(converse_response_with_tool_call("write_file", {"path": "README.md", "content": "# fixture\nupdated\n"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "update README", "summary": "updated"}))
+
+    diff = backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="update README", parallel_group=None, depends_on=()),
+    )
+
+    assert diff.files_touched == ("README.md",)
+    assert (git_fixture_repo / "README.md").read_text() == "# fixture\nupdated\n"
+    assert len(fake_client.call_log) == 3  # read, write, finish -- three real converse calls
+
+
+def test_never_calling_finish_raises_within_the_derived_turn_budget(fake_client, git_fixture_repo):
+    """An "S"-sized story derives a small, real turn budget (see
+    `_max_turns_for_story_size`) -- queue one more list_files response
+    than that budget allows and confirm the loop stops there, raising
+    rather than looping forever or silently accepting non-completion."""
+    expected_max_turns = _max_turns_for_story_size("S")
+    for _ in range(expected_max_turns + 2):  # more than enough queued responses
+        fake_client.queue_response(converse_response_with_tool_call("list_files", {"path": "."}))
+
+    backend = BedrockToolUseAgentBackend(
+        BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1"),
+        fake_client,
+        workspace_root=git_fixture_repo,
+    )
+
+    with pytest.raises(BedrockAgenticLoopExhaustedError, match=str(expected_max_turns)):
+        backend.implement_subtask(
+            run_context={"run_id": "r1", "story_size": "S"},
+            subtask=SubTask(task_id="t1", description="never finishes", parallel_group=None, depends_on=()),
+        )
+    assert len(fake_client.call_log) == expected_max_turns
+
+
+def test_explicit_max_turns_override_takes_precedence_over_story_size(fake_client, git_fixture_repo):
+    """The BEDROCK_MAX_TURNS-style explicit override (live_run.py) must
+    win over the size-derived default, even for a size that would derive
+    a much larger budget."""
+    backend = BedrockToolUseAgentBackend(
+        BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1"),
+        fake_client,
+        workspace_root=git_fixture_repo,
+        max_turns=2,
+    )
+    for _ in range(5):
+        fake_client.queue_response(converse_response_with_tool_call("list_files", {"path": "."}))
+
+    with pytest.raises(BedrockAgenticLoopExhaustedError, match="2 tool-calling turns"):
+        backend.implement_subtask(
+            run_context={"run_id": "r1", "story_size": "L"},  # L would derive a much bigger budget
+            subtask=SubTask(task_id="t1", description="never finishes", parallel_group=None, depends_on=()),
+        )
+    assert len(fake_client.call_log) == 2
+
+
+class TestMaxTurnsForStorySize:
+    """`_max_turns_for_story_size` (see its own docstring for the
+    real-anchor rationale): larger declared story sizes derive
+    proportionally larger turn budgets, and an unknown/missing size
+    falls back to a fixed, documented default rather than raising."""
+
+    def test_larger_sizes_derive_larger_budgets(self):
+        s, m, l = (_max_turns_for_story_size(size) for size in ("S", "M", "L"))
+        assert s < m < l
+
+    def test_derivation_is_proportional_to_the_real_wall_clock_budget(self):
+        # Same seconds-per-turn/fraction assumptions apply to every size,
+        # so the ratio between derived turn counts must match the ratio
+        # between the real Sec. 9.4 wall_clock_minutes budgets exactly.
+        s_turns = _max_turns_for_story_size("S")
+        m_turns = _max_turns_for_story_size("M")
+        s_minutes = DEFAULT_BUDGETS["S"].wall_clock_minutes
+        m_minutes = DEFAULT_BUDGETS["M"].wall_clock_minutes
+        assert m_turns / s_turns == pytest.approx(m_minutes / s_minutes, rel=0.05)
+
+    def test_unknown_or_missing_size_falls_back_rather_than_raising(self):
+        assert _max_turns_for_story_size(None) > 0
+        assert _max_turns_for_story_size("XL") > 0  # DEFAULT_BUDGETS["XL"] is None -- must not KeyError/crash
+        assert _max_turns_for_story_size("not-a-real-size") > 0

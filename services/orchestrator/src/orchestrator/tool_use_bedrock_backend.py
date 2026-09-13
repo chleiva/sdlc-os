@@ -83,6 +83,7 @@ from orchestrator.bedrock_backend import (
     BedrockMalformedOutputError,
     BedrockThrottledError,
 )
+from orchestrator.checkpoints import DEFAULT_BUDGETS
 from orchestrator.model_backend import AgentBackend, DiffOutput, PlanOutput, SubTask
 
 _READ_FILE_TOOL = "read_file"
@@ -196,6 +197,52 @@ def _safe_join(root: Path, relative: str) -> Path:
     return candidate
 
 
+#: Explicit, stated engineering assumption converting a real minutes
+#: budget into a turn count -- NOT a measured constant, but a documented
+#: one, which is the actual fix here: previously this cap (20, then 40)
+#: was a flat guess with no real anchor at all. Real per-turn latency
+#: for a Bedrock Converse call grows with conversation history (the
+#: whole transcript is resent every turn), so this is deliberately a
+#: conservative average across a subtask's full turn budget, not a
+#: best-case number.
+_ASSUMED_SECONDS_PER_TURN = 15.0
+
+#: What fraction of a *story's* whole wall-clock budget (Sec. 9.4) one
+#: *subtask* may spend inside a single `implement_subtask` call. A story
+#: normally decomposes into several subtasks plus verification/retry
+#: time, so letting one subtask claim the entire budget would starve
+#: everything after it; 1/3 leaves headroom for at least two more
+#: subtasks or retries within the same story budget.
+_SUBTASK_BUDGET_FRACTION = 1.0 / 3.0
+
+#: Used only when `story_size` is missing/unrecognized (e.g. an older
+#: `run_context` without it, or "XL" -- Sec. 9.4: not run directly, so
+#: DEFAULT_BUDGETS["XL"] is None) -- same order of magnitude as "S"'s
+#: derived value below, not a new independent guess.
+_FALLBACK_MAX_TURNS = 40
+
+
+def _max_turns_for_story_size(story_size: str | None) -> int:
+    """Derive the per-subtask tool-calling turn cap from the plan's own
+    declared Sec. 9.4 budget for its story size, instead of one flat
+    constant applied to every size alike. Real live-run finding this
+    replaces: turn caps used to be picked as a "reasonable-sounding"
+    integer (20, then 40) with no real justification for that specific
+    number -- an "S" one-file change and an "L" multi-file change got
+    the identical allowance. This ties the cap to the one number in this
+    codebase that already reflects real, agreed-upon per-size resource
+    limits (`checkpoints.DEFAULT_BUDGETS`'s wall_clock_minutes), via the
+    two explicit assumptions above (`_ASSUMED_SECONDS_PER_TURN`,
+    `_SUBTASK_BUDGET_FRACTION`) -- still a heuristic (real per-turn
+    latency is genuinely variable), but now an anchored, size-proportional
+    one rather than an arbitrary guess repeated for every size."""
+    budget = DEFAULT_BUDGETS.get(story_size or "") if story_size else None
+    if budget is None:
+        return _FALLBACK_MAX_TURNS
+    subtask_seconds = budget.wall_clock_minutes * 60 * _SUBTASK_BUDGET_FRACTION
+    return max(1, int(subtask_seconds // _ASSUMED_SECONDS_PER_TURN))
+
+
 class BedrockToolUseAgentBackend(AgentBackend):
     """Real `AgentBackend` for Bedrock/MiniMax M2.5 with a genuine
     multi-turn, tool-using implementation stage. See module docstring."""
@@ -206,25 +253,16 @@ class BedrockToolUseAgentBackend(AgentBackend):
         client: Any,
         *,
         workspace_root: Path,
-        # Real live-run experience: 20 was an arbitrary starting point,
-        # tight enough that even legitimate multi-file subtasks (list a
-        # few files, read for context, write 2-3 files, finish) have
-        # little margin. Raised to 40 as a still-bounded default -- NOT
-        # raised much further than that, deliberately: this loop runs
-        # entirely inside one blocking call, so it is the only guard
-        # against a stuck subtask that can act *within* one subtask
-        # attempt -- the orchestrator's own wall-clock/cost/stuck-
-        # checkpoint budgets (Sec. 9.3) only get evaluated once this call
-        # returns, so they cannot preempt a subtask that goes off the
-        # rails mid-call. A subtask that still can't finish in 40 real
-        # turns is a real signal the plan scoped it too coarsely, not
-        # something to paper over with a much larger number.
-        max_turns: int = 40,
+        # Explicit override (e.g. BEDROCK_MAX_TURNS in live_run.py) --
+        # takes precedence over the size-derived value below when set.
+        # None (the default) means "derive it per-call from run_context
+        # ['story_size']" -- see `_max_turns_for_story_size`.
+        max_turns: int | None = None,
     ) -> None:
         self._config = config
         self._client = client
         self._workspace_root = Path(workspace_root)
-        self._max_turns = max_turns
+        self._max_turns_override = max_turns
         # Planning delegates to the existing, already-real structured-output
         # backend -- composition, not reimplementation (see module docstring).
         self._plan_backend = BedrockAgentBackend(config, client)
@@ -247,8 +285,10 @@ class BedrockToolUseAgentBackend(AgentBackend):
         )
         messages: list[dict] = [{"role": "user", "content": [{"text": user_prompt}]}]
 
+        max_turns = self._max_turns_override or _max_turns_for_story_size(run_context.get("story_size"))
+
         commit_message = ""
-        for _turn in range(self._max_turns):
+        for _turn in range(max_turns):
             response = self._converse_with_tools(messages)
             output_message = response["output"]["message"]
             messages.append(output_message)
@@ -286,7 +326,7 @@ class BedrockToolUseAgentBackend(AgentBackend):
             messages.append({"role": "user", "content": tool_result_blocks})
         else:
             raise BedrockAgenticLoopExhaustedError(
-                f"subtask {subtask.task_id!r} did not finish within {self._max_turns} tool-calling turns"
+                f"subtask {subtask.task_id!r} did not finish within {max_turns} tool-calling turns"
             )
 
         files_touched, lines_changed = self._real_git_diff_stats()
