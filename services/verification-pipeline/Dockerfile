@@ -26,7 +26,7 @@
 #
 # Build context: the repo root (see docker-compose.yml).
 
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app/services
 COPY services/index-server/ /app/services/index-server/

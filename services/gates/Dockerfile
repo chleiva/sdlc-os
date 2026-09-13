@@ -17,7 +17,7 @@
 #
 # Build context: the repo root (see docker-compose.yml).
 
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # kms-boundary is a real, additional transitive dependency: issue-tracker's
 # own pyproject.toml declares "kms-boundary @ file:../kms-boundary" (not

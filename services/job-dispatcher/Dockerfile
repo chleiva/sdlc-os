@@ -14,7 +14,7 @@
 # real, editable-installed sibling dependencies, exactly as the README
 # documents for a host checkout.
 
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app/services
 
