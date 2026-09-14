@@ -23,15 +23,21 @@ does not fully specify the payload shape of; a human should confirm it.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from run_registry import RegistryService, Run
 from run_registry import stages as rr_stages
 
-from orchestrator.checkpoints import DEFAULT_BUDGETS, DiffStats, evaluate_checkpoints, resolve_budget
+from orchestrator.checkpoints import (
+    DEFAULT_BUDGETS,
+    DiffStats,
+    evaluate_checkpoints,
+    resolve_budget,
+)
 from orchestrator.model_backend import AgentBackend, PlanOutput
 from orchestrator.plan_artifact import PlanArtifactStore, generate_plan_artifact
 from orchestrator.progress import RunProgress, RunProgressStore
@@ -43,7 +49,7 @@ RESOLVED = "resolved"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass(frozen=True)
@@ -78,7 +84,7 @@ class Elicitation:
         )
 
     @staticmethod
-    def from_json(text: str) -> "Elicitation":
+    def from_json(text: str) -> Elicitation:
         d = json.loads(text)
         return Elicitation(**d)
 
@@ -113,10 +119,10 @@ class Orchestrator:
         plan_store: PlanArtifactStore,
         progress_store: RunProgressStore,
         tool_invoker: ToolInvoker | None = None,
-        research_fn: Callable[["Orchestrator", Run, ToolInvoker | None], None] | None = None,
-        packaging_fn: Callable[["Orchestrator", Run, ToolInvoker | None], None] | None = None,
+        research_fn: Callable[[Orchestrator, Run, ToolInvoker | None], None] | None = None,
+        packaging_fn: Callable[[Orchestrator, Run, ToolInvoker | None], None] | None = None,
         budgets: dict = DEFAULT_BUDGETS,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         observability: Any | None = None,
     ) -> None:
         self.registry = registry
@@ -468,6 +474,29 @@ class Orchestrator:
                 return st
         return None
 
+    def _ready_subtask_batch(self, artifact: dict, progress: RunProgress, *, first: dict) -> list[dict]:
+        """(New) real batching for `SubTask.parallel_group` (§9.5's
+        marker existed from the start; nothing before this called more
+        than one subtask at a time). If `first` (already known ready --
+        dependencies satisfied, not yet completed) declares a
+        `parallel_group`, gather every other subtask sharing that same
+        group that is *also* independently ready right now, so
+        `_implementation_step` can hand the whole group to
+        `AgentBackend.implement_subtasks_parallel` in one call. A
+        subtask with no `parallel_group` (or whose groupmates aren't
+        ready yet -- still blocked on an unfinished dependency) is
+        dispatched alone, exactly like before this existed."""
+        if not first["parallel_group"]:
+            return [first]
+        done = set(progress.completed_subtask_ids)
+        return [
+            st
+            for st in artifact["subtask_graph"]["subtasks"]
+            if st["task_id"] not in done
+            and st["parallel_group"] == first["parallel_group"]
+            and all(dep in done for dep in st["depends_on"])
+        ]
+
     def _implementation_step(self, run: Run) -> str:
         artifact = self.plan_store.load_latest(run.id)
         if artifact is None:
@@ -476,7 +505,9 @@ class Orchestrator:
         if progress is None:
             progress = self.progress_store.start_new(run_id=run.id, attempt_id=run.current_attempt_id or "")
 
-        from orchestrator.model_backend import SubTask  # local import: avoid cycle at module load
+        from orchestrator.model_backend import (
+            SubTask,  # local import: avoid cycle at module load
+        )
 
         subtask = self._next_subtask(artifact, progress)
         if subtask is None:
@@ -507,40 +538,58 @@ class Orchestrator:
             self.progress_store.save(progress)
             return "verify"
 
-        diff = self.agent_backend.implement_subtask(
-            run_context=self._run_context(run),
-            subtask=SubTask(
-                task_id=subtask["task_id"],
-                description=subtask["description"],
-                parallel_group=subtask["parallel_group"],
-                depends_on=tuple(subtask["depends_on"]),
-                interface_contract=subtask["interface_contract"],
-            ),
-        )
+        batch = self._ready_subtask_batch(artifact, progress, first=subtask)
+        subtask_objs = [
+            SubTask(
+                task_id=st["task_id"],
+                description=st["description"],
+                parallel_group=st["parallel_group"],
+                depends_on=tuple(st["depends_on"]),
+                interface_contract=st["interface_contract"],
+            )
+            for st in batch
+        ]
+        # (New) real dispatch split: 2+ subtasks sharing a ready
+        # `parallel_group` go through `implement_subtasks_parallel` (real
+        # concurrent execution for backends that support it --
+        # `BedrockToolUseAgentBackend`'s own real git-worktree-per-worker
+        # isolation, `AgentBackend`'s default falls back to sequential);
+        # a lone subtask keeps calling `implement_subtask` directly,
+        # unchanged from before this existed.
+        if len(subtask_objs) > 1:
+            diffs = self.agent_backend.implement_subtasks_parallel(
+                run_context=self._run_context(run), subtasks=subtask_objs
+            )
+        else:
+            diffs = [self.agent_backend.implement_subtask(run_context=self._run_context(run), subtask=subtask_objs[0])]
 
-        progress.completed_subtask_ids.append(subtask["task_id"])
-        progress.files_touched = sorted(set(progress.files_touched) | set(diff.files_touched))
-        progress.lines_changed += diff.lines_changed
+        for st, diff in zip(batch, diffs):
+            progress.completed_subtask_ids.append(st["task_id"])
+            progress.files_touched = sorted(set(progress.files_touched) | set(diff.files_touched))
+            progress.lines_changed += diff.lines_changed
         self.progress_store.save(progress)
 
         # D11 instrumentation: ship an idempotent per-subtask cost metric
         # (Section 16.1 durable execution, "no double-spend"). Keyed by
-        # `unit_id=subtask["task_id"]` -- the exact same durable identity
+        # `unit_id=st["task_id"]` -- the exact same durable identity
         # `progress.completed_subtask_ids` already uses to make sure a
         # resumed run never redoes this subtask, so a resume can call this
         # again with the same subtask id (it never legitimately will, since
-        # `_next_subtask` skips completed ids -- see below) and it would
-        # still be a correctly-deduplicated no-op via
+        # `_next_subtask`/`_ready_subtask_batch` skip completed ids) and it
+        # would still be a correctly-deduplicated no-op via
         # `CostMetricStore.apply`'s idempotency-key check, not merely "in
-        # practice never re-called."
+        # practice never re-called." One increment per real subtask in the
+        # batch, not one per batch -- cost attribution stays per-subtask
+        # whether it ran sequentially or in parallel.
         if self.observability is not None:
-            self.observability.record_cost_increment(
-                trace_id=run.trace_id,
-                run_id=run.id,
-                tenant_id=self.tenant_id,
-                unit_id=subtask["task_id"],
-                amount_usd=round(diff.lines_changed * 0.01, 6),
-            )
+            for st, diff in zip(batch, diffs):
+                self.observability.record_cost_increment(
+                    trace_id=run.trace_id,
+                    run_id=run.id,
+                    tenant_id=self.tenant_id,
+                    unit_id=st["task_id"],
+                    amount_usd=round(diff.lines_changed * 0.01, 6),
+                )
 
         budget = resolve_budget(
             story_size=artifact["risk"]["story_size"],

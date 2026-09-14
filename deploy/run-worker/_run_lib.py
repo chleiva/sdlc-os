@@ -274,6 +274,17 @@ def _build_environment(
     agent_backend_kwargs: dict = {"fallback_clients": fallback_clients} if fallback_clients else {}
     if max_turns is not None:
         agent_backend_kwargs["max_turns"] = max_turns
+    # (New) real inputs for genuine parallel subtask execution
+    # (`implement_subtasks_parallel` -- see that method's own docstring):
+    # the real mirror repo every worktree (main + per-subtask) branches
+    # from, the directory per-subtask worktrees live under (mirrors
+    # `SourceControlService`'s own `.worktrees` convention -- see the
+    # "Reusing existing branch+worktree" log line elsewhere in this
+    # file), and this run's own branch as the ref parallel worktrees
+    # start from.
+    agent_backend_kwargs["repo_path"] = mirror_path
+    agent_backend_kwargs["worktrees_root"] = mirror_path / ".worktrees"
+    agent_backend_kwargs["base_ref"] = branch_name
     agent_backend = BedrockToolUseAgentBackend(
         BedrockBackendConfig(model_id=bedrock_model_id, region_name=aws_region),
         bedrock_client,

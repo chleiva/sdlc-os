@@ -101,6 +101,21 @@ class AgentBackend(ABC):
     @abstractmethod
     def implement_subtask(self, *, run_context: dict, subtask: SubTask) -> DiffOutput: ...
 
+    def implement_subtasks_parallel(self, *, run_context: dict, subtasks: list[SubTask]) -> list[DiffOutput]:
+        """(New) real concurrency lever for a `parallel_group` of ready
+        subtasks (§8.1/§9.5 -- `SubTask.parallel_group` existed since
+        this field was first added, but nothing ever called more than
+        one subtask at a time; `core.py`'s `_implementation_step` now
+        batches same-group, dependency-satisfied subtasks and calls this
+        instead of `implement_subtask` once each in a loop). Default
+        implementation here is the exact old sequential behavior --
+        every `AgentBackend` that doesn't override this (every backend
+        except `BedrockToolUseAgentBackend`, today) keeps working
+        unchanged; only a backend that can genuinely isolate concurrent
+        writers (real per-subtask git worktrees) should override it with
+        real parallelism, never fake it by just calling this faster."""
+        return [self.implement_subtask(run_context=run_context, subtask=st) for st in subtasks]
+
 
 class ScriptedAgentBackend(AgentBackend):
     """Deterministic mock `AgentBackend`: canned outputs consumed in a

@@ -70,8 +70,11 @@ stage `core.py` runs next.
 
 from __future__ import annotations
 
+import concurrent.futures
+import dataclasses
 import json
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +89,11 @@ from orchestrator.bedrock_backend import (
 )
 from orchestrator.checkpoints import DEFAULT_BUDGETS
 from orchestrator.model_backend import AgentBackend, DiffOutput, PlanOutput, SubTask
+from orchestrator.worktree import (
+    WorktreeHandle,
+    create_agent_worktree,
+    remove_agent_worktree,
+)
 
 _READ_FILE_TOOL = "read_file"
 _WRITE_FILE_TOOL = "write_file"
@@ -264,13 +272,27 @@ class BedrockToolUseAgentBackend(AgentBackend):
         # see `bedrock_backend.call_converse_with_retry`. Passed through
         # to the composed planning backend too, so a plan/re-plan call
         # gets the exact same regional resilience as implementation.
-        fallback_clients: "list[tuple[Any, str]] | None" = None,
+        fallback_clients: list[tuple[Any, str]] | None = None,
+        # (New) real inputs for `implement_subtasks_parallel`'s genuine
+        # concurrency: the real repo `worktree.create_agent_worktree`
+        # branches new per-subtask worktrees off of, the directory they
+        # live under, and the ref (this run's own branch head) each one
+        # starts from. All three are required for real parallel
+        # execution; any missing means "can't safely create isolated
+        # worktrees here" and `implement_subtasks_parallel` falls back
+        # to the inherited sequential behavior rather than guessing.
+        repo_path: Path | None = None,
+        worktrees_root: Path | None = None,
+        base_ref: str | None = None,
     ) -> None:
         self._config = config
         self._client = client
         self._workspace_root = Path(workspace_root)
         self._max_turns_override = max_turns
         self._fallback_clients = fallback_clients or []
+        self._repo_path = Path(repo_path) if repo_path is not None else None
+        self._worktrees_root = Path(worktrees_root) if worktrees_root is not None else None
+        self._base_ref = base_ref
         # One instance, one sticky region preference (see
         # `bedrock_backend.call_converse_with_retry`'s own docstring) --
         # separate from the composed planning backend's own, since
@@ -368,6 +390,126 @@ class BedrockToolUseAgentBackend(AgentBackend):
             commit_message=commit_message,
             subtask_id=subtask.task_id,
         )
+
+    # -- Real parallel execution (§8.1/§9.5 `parallel_group`) ----------------
+
+    def implement_subtasks_parallel(self, *, run_context: dict, subtasks: list[SubTask]) -> list[DiffOutput]:
+        """Real concurrency lever: `worktree.py`'s `create_agent_worktree`/
+        `remove_agent_worktree` already implemented real git-worktree-per-
+        agent isolation (§8.1), but its own docstring flagged "a full
+        concurrent scheduler that actually runs those agents at the same
+        time is out of this deliverable's scope" -- this closes that gap.
+
+        For each ready subtask in `subtasks` (`core.py` has already
+        verified they share one `parallel_group` and their dependencies
+        are satisfied): create a real, isolated worktree branched off
+        this run's own branch head, hand it to a transient
+        `BedrockToolUseAgentBackend` pinned to one region (round-robined
+        across `[primary] + fallback_clients` -- one *starting* region
+        per worker for real load distribution, while each worker still
+        gets the *full* region list as its own retry/fail-over resilience
+        list, unchanged from the sequential case), and run
+        `implement_subtask` for real, concurrently, on a real OS thread
+        per subtask (these are network-bound Converse calls plus local
+        file I/O, not CPU-bound -- a thread pool gives real concurrency
+        here without multiprocessing's IPC cost).
+
+        Falls back to the inherited sequential behavior (one subtask at a
+        time, this instance's own single worktree/region) if this
+        instance wasn't constructed with real worktree-creation inputs,
+        or if there's nothing to parallelize.
+        """
+        # Local, narrowed copies: mypy can't carry a None-check on a
+        # `self.` attribute across the closure boundary below (another
+        # thread could in principle reassign it), and these three are
+        # genuinely required non-None for every use inside `_run_one`.
+        repo_path, worktrees_root, base_ref = self._repo_path, self._worktrees_root, self._base_ref
+        if len(subtasks) < 2 or repo_path is None or worktrees_root is None or base_ref is None:
+            return super().implement_subtasks_parallel(run_context=run_context, subtasks=subtasks)
+
+        regions: list[tuple[Any, str]] = [(self._client, self._config.region_name)] + list(self._fallback_clients)
+        batch_id = uuid.uuid4().hex[:8]
+        run_id = run_context.get("run_id", "run")
+
+        def _run_one(index: int, subtask: SubTask) -> tuple[DiffOutput | None, WorktreeHandle, BaseException | None]:
+            session_id = f"{run_id}-{subtask.task_id}-{batch_id}"
+            handle = create_agent_worktree(
+                repo_path=repo_path,
+                base_ref=base_ref,
+                session_id=session_id,
+                worktrees_root=worktrees_root,
+            )
+            worker_client, worker_region = regions[index % len(regions)]
+            worker_config = (
+                self._config if worker_region == self._config.region_name
+                else dataclasses.replace(self._config, region_name=worker_region)
+            )
+            # Full resilience list minus the worker's own starting
+            # region -- a worker that starts in a struggling region can
+            # still fail over through every other one, exactly like the
+            # sequential path.
+            worker_fallbacks = [(c, r) for c, r in regions if r != worker_region] or None
+            worker_backend = BedrockToolUseAgentBackend(
+                worker_config, worker_client,
+                workspace_root=Path(handle.worktree_path),
+                max_turns=self._max_turns_override,
+                fallback_clients=worker_fallbacks,
+            )
+            try:
+                diff = worker_backend.implement_subtask(run_context=run_context, subtask=subtask)
+                return diff, handle, None
+            except BaseException as exc:  # noqa: BLE001 -- collected, not swallowed; see below
+                return None, handle, exc
+
+        results: dict[str, tuple[DiffOutput | None, WorktreeHandle, BaseException | None]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(subtasks)) as pool:
+            futures = {pool.submit(_run_one, i, st): st for i, st in enumerate(subtasks)}
+            for future in concurrent.futures.as_completed(futures):
+                subtask = futures[future]
+                results[subtask.task_id] = future.result()
+
+        errors = [exc for _diff, _handle, exc in results.values() if exc is not None]
+        if errors:
+            # Real, disclosed limitation: no partial merge is attempted --
+            # merging a half-failed subtask's incomplete worktree into the
+            # run's real branch would corrupt it. Every worktree (failed
+            # or succeeded) is cleaned up and the first real failure is
+            # re-raised so `core.py`'s existing implementation-failure
+            # handling applies unchanged.
+            for _diff, handle, _exc in results.values():
+                remove_agent_worktree(repo_path=repo_path, worktree_path=Path(handle.worktree_path))
+            raise errors[0]
+
+        # Merge every worktree branch into the run's real main worktree,
+        # one at a time, in the caller's own dependency order -- never
+        # all at once, so a real merge conflict on a later branch is
+        # attributed to that specific subtask and never silently
+        # clobbers an earlier, already-merged one. Worktrees of the same
+        # repo share one object database/ref namespace, so each branch
+        # is directly mergeable from `self._workspace_root` with no
+        # fetch needed.
+        diffs: list[DiffOutput] = []
+        for subtask in subtasks:
+            diff, handle, _exc = results[subtask.task_id]
+            merge = subprocess.run(
+                ["git", "merge", "--no-ff", "-m", f"Merge parallel subtask {subtask.task_id}", handle.branch_name],
+                cwd=self._workspace_root, capture_output=True, text=True, check=False,
+            )
+            if merge.returncode != 0:
+                for _d, h, _e in results.values():
+                    remove_agent_worktree(repo_path=repo_path, worktree_path=Path(h.worktree_path))
+                raise BedrockInvocationError(
+                    f"real merge conflict bringing parallel subtask {subtask.task_id!r} "
+                    f"(branch {handle.branch_name!r}) into the main worktree -- not "
+                    f"auto-resolved, needs a human: {merge.stderr.strip()}"
+                )
+            assert diff is not None  # guaranteed: `errors` was empty, so no subtask failed
+            diffs.append(diff)
+
+        for _diff, handle, _exc in results.values():
+            remove_agent_worktree(repo_path=repo_path, worktree_path=Path(handle.worktree_path))
+
+        return diffs
 
     # -- Real tool execution, scoped to the real workspace ------------------
 

@@ -16,20 +16,26 @@ turn-budget bugs surfaced only on a real live run instead of in CI.
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 import pytest
 from botocore.exceptions import ReadTimeoutError
 
+from orchestrator.bedrock_backend import (
+    BedrockBackendConfig,
+    BedrockInvocationError,
+    BedrockThrottledError,
+)
 from orchestrator.checkpoints import DEFAULT_BUDGETS
-from orchestrator.bedrock_backend import BedrockBackendConfig, BedrockThrottledError
 from orchestrator.model_backend import SubTask
 from orchestrator.tool_use_bedrock_backend import (
     BedrockAgenticLoopExhaustedError,
     BedrockToolUseAgentBackend,
     _max_turns_for_story_size,
 )
-from tests.fake_bedrock_client import FakeBedrockRuntimeClient, converse_response_with_tool_call
+from tests.fake_bedrock_client import (
+    FakeBedrockRuntimeClient,
+    converse_response_with_tool_call,
+)
 
 _FAKE_MODEL_ID = "minimax.m2-5-v1:0"
 
@@ -245,6 +251,122 @@ def test_explicit_max_turns_override_takes_precedence_over_story_size(fake_clien
             subtask=SubTask(task_id="t1", description="never finishes", parallel_group=None, depends_on=()),
         )
     assert len(fake_client.call_log) == 2
+
+
+class TestImplementSubtasksParallel:
+    """Real concurrency for `SubTask.parallel_group` (§8.1/§9.5):
+    `worktree.py`'s `create_agent_worktree`/`remove_agent_worktree` were
+    real but nothing ever drove a real concurrent scheduler through them
+    before this -- see that module's own docstring ("out of this
+    deliverable's scope"). These tests use a real local git repo
+    (`git_fixture_repo`), real `git worktree add`/`merge` calls, and real
+    OS threads -- only the Bedrock Converse call itself is faked."""
+
+    def test_two_independent_subtasks_run_concurrently_and_both_merge_in(self, git_fixture_repo, tmp_path):
+        client_a = FakeBedrockRuntimeClient()
+        client_b = FakeBedrockRuntimeClient()
+        client_a.queue_response(converse_response_with_tool_call("write_file", {"path": "a.py", "content": "a = 1\n"}))
+        client_a.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add a.py", "summary": "added a"}))
+        client_b.queue_response(converse_response_with_tool_call("write_file", {"path": "b.py", "content": "b = 1\n"}))
+        client_b.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add b.py", "summary": "added b"}))
+
+        config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1")
+        backend = BedrockToolUseAgentBackend(
+            config, client_a,
+            workspace_root=git_fixture_repo,
+            fallback_clients=[(client_b, "us-west-2")],
+            repo_path=git_fixture_repo,
+            worktrees_root=tmp_path / "worktrees",
+            base_ref="main",
+        )
+
+        diffs = backend.implement_subtasks_parallel(
+            run_context={"run_id": "r1", "story_size": "S"},
+            subtasks=[
+                SubTask(task_id="ta", description="add a.py", parallel_group="g1", depends_on=()),
+                SubTask(task_id="tb", description="add b.py", parallel_group="g1", depends_on=()),
+            ],
+        )
+
+        assert {d.subtask_id for d in diffs} == {"ta", "tb"}
+        assert (git_fixture_repo / "a.py").read_text() == "a = 1\n"
+        assert (git_fixture_repo / "b.py").read_text() == "b = 1\n"
+
+        # Real round-robin distribution: each subtask really ran against
+        # a *different* region's client, not both on the primary.
+        assert len(client_a.call_log) == 2
+        assert len(client_b.call_log) == 2
+
+        # Both real merge commits landed on the run's real main branch.
+        log = subprocess.run(["git", "log", "--oneline"], cwd=git_fixture_repo, capture_output=True, text=True, check=True)
+        assert "Merge parallel subtask ta" in log.stdout
+        assert "Merge parallel subtask tb" in log.stdout
+
+        # Per-subtask worktrees are real and then really cleaned up
+        # afterward, not leaked.
+        wt_list = subprocess.run(["git", "worktree", "list"], cwd=git_fixture_repo, capture_output=True, text=True, check=True)
+        assert wt_list.stdout.count("\n") == 1  # only the main worktree remains registered
+
+    def test_a_real_conflicting_merge_raises_rather_than_silently_resolving(self, git_fixture_repo, tmp_path):
+        """Two subtasks in the same group writing the same file is
+        exactly the failure mode `plan_artifact.py`'s `interface_contract`
+        requirement is meant to prevent upstream -- but nothing enforces
+        the plan actually avoided it, so this must be a real, loud
+        failure (a human decision), never a silent last-writer-wins."""
+        client_a = FakeBedrockRuntimeClient()
+        client_b = FakeBedrockRuntimeClient()
+        client_a.queue_response(converse_response_with_tool_call("write_file", {"path": "same.py", "content": "a = 1\n"}))
+        client_a.queue_response(converse_response_with_tool_call("finish", {"commit_message": "write same.py from a", "summary": "a"}))
+        client_b.queue_response(converse_response_with_tool_call("write_file", {"path": "same.py", "content": "b = 2\n"}))
+        client_b.queue_response(converse_response_with_tool_call("finish", {"commit_message": "write same.py from b", "summary": "b"}))
+
+        config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1")
+        backend = BedrockToolUseAgentBackend(
+            config, client_a,
+            workspace_root=git_fixture_repo,
+            fallback_clients=[(client_b, "us-west-2")],
+            repo_path=git_fixture_repo,
+            worktrees_root=tmp_path / "worktrees",
+            base_ref="main",
+        )
+
+        with pytest.raises(BedrockInvocationError, match="real merge conflict"):
+            backend.implement_subtasks_parallel(
+                run_context={"run_id": "r1", "story_size": "S"},
+                subtasks=[
+                    SubTask(task_id="ta", description="write same.py", parallel_group="g1", depends_on=()),
+                    SubTask(task_id="tb", description="write same.py differently", parallel_group="g1", depends_on=()),
+                ],
+            )
+
+        # Cleaned up even on failure -- no leaked worktree.
+        wt_list = subprocess.run(["git", "worktree", "list"], cwd=git_fixture_repo, capture_output=True, text=True, check=True)
+        assert wt_list.stdout.count("\n") == 1
+
+    def test_missing_worktree_inputs_falls_back_to_sequential(self, git_fixture_repo):
+        """No `repo_path`/`worktrees_root`/`base_ref` given -- must use
+        the inherited sequential default (one worktree, one region, one
+        subtask at a time), never crash trying to create a real worktree
+        with no real repo to create it from."""
+        client = FakeBedrockRuntimeClient()
+        client.queue_response(converse_response_with_tool_call("write_file", {"path": "a.py", "content": "a = 1\n"}))
+        client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add a.py", "summary": "a"}))
+        client.queue_response(converse_response_with_tool_call("write_file", {"path": "b.py", "content": "b = 1\n"}))
+        client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add b.py", "summary": "b"}))
+
+        backend = BedrockToolUseAgentBackend(
+            BedrockBackendConfig(model_id=_FAKE_MODEL_ID, region_name="us-east-1"),
+            client,
+            workspace_root=git_fixture_repo,
+        )
+        diffs = backend.implement_subtasks_parallel(
+            run_context={"run_id": "r1", "story_size": "S"},
+            subtasks=[
+                SubTask(task_id="ta", description="add a.py", parallel_group="g1", depends_on=()),
+                SubTask(task_id="tb", description="add b.py", parallel_group="g1", depends_on=()),
+            ],
+        )
+        assert [d.subtask_id for d in diffs] == ["ta", "tb"]
 
 
 class TestMaxTurnsForStorySize:
