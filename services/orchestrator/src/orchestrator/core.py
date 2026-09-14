@@ -210,10 +210,31 @@ class Orchestrator:
             budgets=self.budgets,
         )
         next_version = self.plan_store.latest_version_number(run.id) + 1
+
+        def _on_parallel_group_demoted(demoted_task_ids: list[str]) -> None:
+            # Real, disclosed behavior change from what the model
+            # authored (see `plan_artifact.generate_plan_artifact`'s own
+            # docstring for the real live-run bug this replaces) -- Sec.
+            # 16.4 "alerting, not babysitting" applies here exactly like
+            # a checkpoint trigger: a human should be able to see this
+            # happened, even though it never blocks the run.
+            if self.observability is not None:
+                self.observability.push_alert(
+                    kind="parallel_group_demoted",
+                    message=(
+                        f"subtask(s) {demoted_task_ids} lost parallel eligibility "
+                        "(missing interface_contract) and will run sequentially"
+                    ),
+                    run_id=run.id,
+                    tenant_id=self.tenant_id,
+                    trace_id=run.trace_id,
+                )
+
         artifact = generate_plan_artifact(
             run_id=run.id,
             plan_version=next_version,
             plan_output=plan_output,
+            on_parallel_group_demoted=_on_parallel_group_demoted,
             budget=budget,
             human_plan_text=human_plan_text,
         )

@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,7 @@ class PlanArtifactValidationError(Exception):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def hash_human_plan(human_plan_text: str) -> str:
@@ -60,11 +61,27 @@ def generate_plan_artifact(
     plan_output: PlanOutput,
     budget: Budget,
     human_plan_text: str,
+    on_parallel_group_demoted: Callable[[list[str]], None] | None = None,
 ) -> dict[str, Any]:
     """Build the structured plan artifact from a model-produced
     `PlanOutput`, and validate it against `schema/plan_artifact.schema.json`
     before returning it -- an artifact that doesn't validate is a bug in
-    this generator, never shipped to a caller."""
+    this generator, never shipped to a caller.
+
+    **Real live-run bug this closes**: a model-authored `parallel_group`
+    whose subtasks don't all declare an `interface_contract` used to
+    raise `PlanArtifactValidationError` right here and abort the entire
+    run before it ever reached a human at the plan-approval gate --
+    confirmed on a real live run (MiniMax M2.5 set `parallel_group` on
+    two subtasks, `interface_contract` on neither). Section 8.1's
+    "contracts before parallel writes" is a real safety invariant
+    worth keeping, but sequential execution of the same subtasks is
+    always safe -- just not concurrent -- so an ungoverned group is now
+    repaired (demoted to sequential) rather than treated as fatal; see
+    `_demote_ungoverned_parallel_groups`. `on_parallel_group_demoted`,
+    if given, is called with the demoted task_ids so a caller (`core.py`)
+    can surface this as a real alert instead of a silent behavior
+    change."""
     artifact: dict[str, Any] = {
         "schema_version": "1.0.0",
         "run_id": run_id,
@@ -113,30 +130,47 @@ def generate_plan_artifact(
         raise PlanArtifactValidationError(
             "generated plan artifact failed its own schema: " + "; ".join(e.message for e in errors)
         )
-    validate_contracts_fixed_before_parallel_execution(artifact)
+    demoted = _demote_ungoverned_parallel_groups(artifact)
+    if demoted:
+        # Real, visible signal -- same stdout channel a real live run's
+        # driver (`deploy/run-worker/jira_poll_run.py`) already logs
+        # through, so this shows up exactly where the fatal crash it
+        # replaces used to.
+        print(
+            f"[plan_artifact] run {run_id!r} plan v{plan_version}: demoted "
+            f"parallel subtask(s) {demoted} to sequential execution -- their "
+            f"parallel_group had no interface_contract fixed for every "
+            f"member (Sec. 8.1 'contracts before parallel writes')."
+        )
+        if on_parallel_group_demoted is not None:
+            on_parallel_group_demoted(demoted)
     return artifact
 
 
-def validate_contracts_fixed_before_parallel_execution(artifact: dict[str, Any]) -> None:
-    """Section 8.1: "contracts before parallel writes" -- fixed before
-    implementation starts. Enforced mechanically here: any subtask that
-    shares a `parallel_group` with another subtask must declare a
-    non-null `interface_contract`, or plan-artifact generation itself
-    fails rather than silently allowing ungoverned parallel writes."""
+def _demote_ungoverned_parallel_groups(artifact: dict[str, Any]) -> list[str]:
+    """Repairs `artifact` in place: any `parallel_group` with 2+ members
+    where at least one lacks a non-null `interface_contract` has every
+    member in that group demoted to `parallel_group: null` /
+    `mode: "sequential"` -- partial governance (some members contracted,
+    some not) isn't real governance, so the whole group loses its
+    parallel eligibility, not just the offending member(s). Returns the
+    demoted task_ids (empty if every group was already properly
+    governed, or there were no parallel groups at all)."""
     subtasks = artifact["subtask_graph"]["subtasks"]
     groups: dict[str, list[dict]] = {}
     for st in subtasks:
         if st["parallel_group"]:
             groups.setdefault(st["parallel_group"], []).append(st)
-    for group_name, members in groups.items():
+    demoted: list[str] = []
+    for members in groups.values():
         if len(members) < 2:
             continue
-        missing = [m["task_id"] for m in members if not m["interface_contract"]]
-        if missing:
-            raise PlanArtifactValidationError(
-                f"parallel_group {group_name!r} has subtask(s) with no interface_contract "
-                f"fixed before parallel execution: {missing}"
-            )
+        if any(not m["interface_contract"] for m in members):
+            for m in members:
+                m["parallel_group"] = None
+                m["mode"] = "sequential"
+                demoted.append(m["task_id"])
+    return demoted
 
 
 def diff_touches_out_of_scope(artifact: dict[str, Any], files_touched: list[str]) -> list[str]:

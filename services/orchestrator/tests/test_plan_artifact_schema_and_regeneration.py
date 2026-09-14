@@ -3,15 +3,13 @@ from a `PlanOutput`, and "regenerated, not hand-edited" as an actually
 enforced property (there is no update/patch function to call instead)."""
 from __future__ import annotations
 
-import pytest
 from jsonschema import Draft202012Validator
 
 from orchestrator.checkpoints import DEFAULT_BUDGETS
 from orchestrator.model_backend import SubTask
 from orchestrator.plan_artifact import (
-    PlanArtifactStore,
-    PlanArtifactValidationError,
     SCHEMA,
+    PlanArtifactStore,
     diff_touches_out_of_scope,
     generate_plan_artifact,
     hash_human_plan,
@@ -38,18 +36,48 @@ def test_generate_plan_artifact_produces_a_schema_valid_document():
     assert artifact["source_plan_hash"] == hash_human_plan("the plan text")
 
 
-def test_parallel_subtasks_without_a_fixed_interface_contract_are_rejected():
+def test_parallel_subtasks_without_a_fixed_interface_contract_are_demoted_not_rejected():
     """Section 8.1: "contracts before parallel writes" -- fixed before
-    implementation starts. Enforced mechanically: two subtasks sharing a
-    parallel_group but no interface_contract fail generation outright."""
+    implementation starts. Real live-run bug this guards against: this
+    used to raise `PlanArtifactValidationError` right here and abort the
+    entire run before a human ever saw the plan-approval gate (confirmed
+    on a real live run: the model set `parallel_group` on two subtasks
+    and populated `interface_contract` on neither). Sequential execution
+    of the same subtasks is always safe, so generation now repairs the
+    artifact (demotes the whole group to sequential) instead of treating
+    an authoring gap as fatal -- and calls `on_parallel_group_demoted`
+    with the demoted ids so a caller can still surface it."""
     plan = make_plan_output(
         subtasks=[
             SubTask(task_id="t1", description="a", parallel_group="g1", depends_on=()),
             SubTask(task_id="t2", description="b", parallel_group="g1", depends_on=()),
         ]
     )
-    with pytest.raises(PlanArtifactValidationError, match="interface_contract"):
-        generate_plan_artifact(run_id="run-2", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="t")
+    demoted_calls = []
+    artifact = generate_plan_artifact(
+        run_id="run-2", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="t",
+        on_parallel_group_demoted=demoted_calls.append,
+    )
+    assert demoted_calls == [["t1", "t2"]]
+    for st in artifact["subtask_graph"]["subtasks"]:
+        assert st["parallel_group"] is None
+        assert st["mode"] == "sequential"
+    Draft202012Validator(SCHEMA).validate(artifact)  # still a fully schema-valid artifact after repair
+
+
+def test_a_group_with_only_some_members_contracted_is_fully_demoted():
+    """Partial governance isn't real governance: one contracted member
+    and one uncontracted member in the same group must demote BOTH, not
+    just the uncontracted one -- a lone "parallel" subtask left behind
+    would be meaningless."""
+    plan = make_plan_output(
+        subtasks=[
+            SubTask(task_id="t1", description="a", parallel_group="g1", depends_on=(), interface_contract="POST /a -> {ok: bool}"),
+            SubTask(task_id="t2", description="b", parallel_group="g1", depends_on=()),
+        ]
+    )
+    artifact = generate_plan_artifact(run_id="run-2b", plan_version=1, plan_output=plan, budget=DEFAULT_BUDGETS["S"], human_plan_text="t")
+    assert {st["task_id"]: st["parallel_group"] for st in artifact["subtask_graph"]["subtasks"]} == {"t1": None, "t2": None}
 
 
 def test_parallel_subtasks_with_fixed_contracts_are_accepted():
