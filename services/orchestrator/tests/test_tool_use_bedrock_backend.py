@@ -108,6 +108,39 @@ def test_read_then_write_then_finish_is_a_real_multi_turn_loop(backend, fake_cli
     assert len(fake_client.call_log) == 3  # read, write, finish -- three real converse calls
 
 
+def test_a_malformed_tool_call_missing_a_required_field_does_not_crash_the_run(backend, fake_client, git_fixture_repo):
+    """Real live-run bug this closes: a `write_file` tool call with no
+    "content" field (Bedrock's own toolConfig `required` list is a hint
+    to the model, never a real guarantee it complies) used to raise a
+    bare `KeyError('content')` straight out of the implementation loop,
+    crashing the entire subtask -- confirmed on a real live run, where
+    it surfaced as "resuming run ... failed with a real error
+    (KeyError('content'))" and killed the whole resume attempt. It must
+    instead come back to the model as a real tool error, giving it a
+    chance to retry within its own turn budget."""
+    fake_client.queue_response(converse_response_with_tool_call("write_file", {"path": "hello.py"}))  # no "content"
+    fake_client.queue_response(converse_response_with_tool_call("write_file", {"path": "hello.py", "content": "x = 1\n"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "add hello.py", "summary": "s"}))
+
+    diff = backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="add hello.py", parallel_group=None, depends_on=()),
+    )
+
+    assert diff.files_touched == ("hello.py",)
+    assert (git_fixture_repo / "hello.py").read_text() == "x = 1\n"
+    # The malformed call really was reported back as a tool error, not
+    # silently ignored or retried transparently -- the model saw it and
+    # made real progress on its own very next turn. `call_log[i]
+    # ["messages"]` is a live reference to the one growing conversation
+    # list (not a per-call snapshot), so index by real transcript
+    # position: [0]=initial prompt, [1]=assistant's first (malformed)
+    # tool call, [2]=the user-role tool-result turn reporting it back.
+    tool_result = fake_client.call_log[-1]["messages"][2]["content"][0]["toolResult"]["content"][0]["json"]
+    assert "missing required field" in tool_result["error"]
+    assert "content" in tool_result["error"]
+
+
 def test_each_subtask_gets_its_own_real_commit_with_a_distinct_bot_identity(backend, fake_client, git_fixture_repo):
     """Two real subtasks in the same backend instance must produce two
     real, separate commits (not one combined commit, and not zero) --

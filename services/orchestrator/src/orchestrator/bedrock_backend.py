@@ -152,7 +152,11 @@ _PLAN_SYSTEM_PROMPT = (
     "concrete code-authoring action (create, modify, or delete specific "
     "real files) -- never a subtask to run, execute, or verify tests, "
     "since that happens automatically, for real, in a separate stage "
-    "after every subtask here is implemented."
+    "after every subtask here is implemented. scope_in and scope_out "
+    "must be real, literal file paths (e.g. 'tetris.html', "
+    "'src/app.py') -- never prose feature descriptions -- since the "
+    "file(s) this plan's own deliverable requires must always be listed "
+    "as real paths in scope_in."
 )
 _IMPLEMENT_SYSTEM_PROMPT = (
     "You are the implementation stage of an autonomous coding agent, "
@@ -391,7 +395,7 @@ def _call_with_soft_timeout(client: Any, request_kwargs: dict, *, timeout_second
         pool.shutdown(wait=False)
 
 
-def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, config: "BedrockBackendConfig") -> dict:
+def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, config: BedrockBackendConfig) -> dict:
     """`call_converse_with_retry`'s real retry-with-backoff loop against
     exactly one region/client -- see that function for the public
     entrypoint, which wraps this with region fallback."""
@@ -495,9 +499,9 @@ def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, c
 
 
 def call_converse_with_retry(
-    *, client: Any, request_kwargs: dict, config: "BedrockBackendConfig",
-    fallback_clients: "list[tuple[Any, str]] | None" = None,
-    sticky_state: "dict | None" = None,
+    *, client: Any, request_kwargs: dict, config: BedrockBackendConfig,
+    fallback_clients: list[tuple[Any, str]] | None = None,
+    sticky_state: dict | None = None,
 ) -> dict:
     """Call `bedrock-runtime`'s real `converse` operation against
     `client`/`config.region_name`, retrying with exponential backoff on
@@ -538,12 +542,12 @@ def call_converse_with_retry(
     Returns the raw Converse API response dict -- callers extract
     whatever shape they need from it (a single forced tool call's
     input, or a multi-turn tool-use message)."""
-    attempts: list[tuple[Any, "BedrockBackendConfig"]] = [(client, config)]
+    attempts: list[tuple[Any, BedrockBackendConfig]] = [(client, config)]
     for fallback_client, fallback_region in fallback_clients or []:
         attempts.append((fallback_client, dataclasses.replace(config, region_name=fallback_region)))
 
     start = (sticky_state.get("index", 0) % len(attempts)) if sticky_state is not None else 0
-    order = list(range(start, len(attempts))) + list(range(0, start))
+    order = list(range(start, len(attempts))) + list(range(start))
 
     last_error: BedrockThrottledError | None = None
     for position, index in enumerate(order):
@@ -578,7 +582,7 @@ class BedrockAgentBackend(AgentBackend):
     `Converse` API. See module docstring for what's real vs. mocked, the
     structured-output mechanism, and why `model_id` has no default."""
 
-    def __init__(self, config: BedrockBackendConfig, client: Any, *, fallback_clients: "list[tuple[Any, str]] | None" = None) -> None:
+    def __init__(self, config: BedrockBackendConfig, client: Any, *, fallback_clients: list[tuple[Any, str]] | None = None) -> None:
         """`client` is a dependency-injected object implementing the same
         `.converse(**kwargs) -> dict` call signature as a real `boto3`
         `bedrock-runtime` client (constructed by the caller, e.g.

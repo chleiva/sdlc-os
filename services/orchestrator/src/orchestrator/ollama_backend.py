@@ -44,7 +44,6 @@ and stdlib is sufficient for plain REST/JSON against a single host).
 from __future__ import annotations
 
 import json
-import socket
 import time
 import urllib.error
 import urllib.request
@@ -181,8 +180,39 @@ PLAN_OUTPUT_SCHEMA = {
     "properties": {
         "outcomes": {"type": "string"},
         "acceptance_criteria": {"type": "array", "items": _ACCEPTANCE_CRITERION_SCHEMA},
-        "scope_in": {"type": "array", "items": {"type": "string"}},
-        "scope_out": {"type": "array", "items": {"type": "string"}},
+        # Real live-run bug this schema-level description closes: a plan
+        # populated scope_in with prose feature descriptions ("Create a
+        # single HTML file with embedded CSS and JavaScript") instead of
+        # the real path ("tetris.html") the implementation loop actually
+        # wrote to. `checkpoints.check_risk` does a literal, mechanical
+        # set-difference between the diff's real touched files and this
+        # list (Section 9.5's own design -- "never a judgment call left
+        # to the implementing agent") -- so a prose scope_in made every
+        # real file the run legitimately touched look "out of scope",
+        # firing a real Section 9.3 risk checkpoint on the run's own
+        # primary deliverable. Shared by every vendor backend (see the
+        # _SUBTASK_SCHEMA comment above for why fixing it here covers
+        # all of them at once).
+        "scope_in": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Real, literal file paths (relative to the repo root) "
+                "this plan expects to touch -- e.g. 'tetris.html', "
+                "'src/app.py'. Never a prose description of a feature "
+                "or task; every entry must be a path the implementation "
+                "loop could plausibly pass to read_file/write_file."
+            ),
+        },
+        "scope_out": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Real file paths, or a real path pattern, explicitly "
+                "excluded from this plan's scope. Same constraint as "
+                "scope_in: real paths, never prose."
+            ),
+        },
         "subtasks": {"type": "array", "items": _SUBTASK_SCHEMA},
         "story_size": {"type": "string", "enum": ["S", "M", "L", "XL"]},
         "cross_cutting_or_high_risk": {"type": "boolean"},
@@ -224,7 +254,11 @@ _PLAN_SYSTEM_PROMPT = (
     "Every subtask must be a concrete code-authoring action (create, "
     "modify, or delete specific real files) -- never a subtask to run, "
     "execute, or verify tests, since that happens automatically, for "
-    "real, in a separate stage after every subtask here is implemented."
+    "real, in a separate stage after every subtask here is implemented. "
+    "scope_in and scope_out must be real, literal file paths (e.g. "
+    "'tetris.html', 'src/app.py') -- never prose feature descriptions -- "
+    "since the file(s) this plan's own deliverable requires must always "
+    "be listed as real paths in scope_in."
 )
 
 _IMPLEMENT_SYSTEM_PROMPT = (
@@ -396,7 +430,7 @@ class OllamaAgentBackend(AgentBackend):
                     status_code=e.code,
                     body=body,
                 ) from e
-            except (urllib.error.URLError, socket.timeout, ConnectionRefusedError, TimeoutError) as e:
+            except (urllib.error.URLError, ConnectionRefusedError, TimeoutError) as e:
                 # URLError wraps connection-refused (node not up yet) and
                 # socket.timeout wraps "accepted the connection but never
                 # responded" (model still loading into VRAM) -- both are

@@ -532,11 +532,24 @@ class BedrockToolUseAgentBackend(AgentBackend):
                 entries = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir() if p.name != ".git")
                 return {"entries": entries}
             return {"error": f"unknown tool {name!r}"}
-        except ValueError as exc:
-            # A path-escape attempt (_safe_join) -- reported back to the
-            # model as a tool error, not raised out of the loop, so a
-            # misbehaving-but-not-malicious model gets a chance to correct
-            # itself rather than the whole subtask aborting.
+        except (ValueError, KeyError, TypeError) as exc:
+            # A path-escape attempt (_safe_join, ValueError) -- or a real
+            # live-run bug this now also closes: a `KeyError` (e.g. the
+            # model called write_file with no "content" field) used to
+            # propagate straight out of this method, out of the whole
+            # implement_subtask loop, and crash the entire subtask (and
+            # on resume, the whole run: confirmed on a real live run --
+            # "resuming run ... failed with a real error
+            # (KeyError('content'))"). The tool's declared `inputSchema`
+            # `required` list is a hint to the model via Bedrock's
+            # toolConfig, never a real guarantee it complies -- so any
+            # missing/malformed field is reported back to the model as a
+            # real tool error (same as the path-escape case) and never
+            # raised out of the loop, giving a misbehaving-but-not-
+            # malicious model a chance to correct itself within its own
+            # turn budget instead of aborting the run.
+            if isinstance(exc, KeyError):
+                return {"error": f"{name}: missing required field {exc.args[0]!r} in the tool call input"}
             return {"error": str(exc)}
 
     @staticmethod

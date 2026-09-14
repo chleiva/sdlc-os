@@ -59,7 +59,6 @@ Uses only the standard library's `urllib` for HTTP, matching
 from __future__ import annotations
 
 import json
-import socket
 import time
 import urllib.error
 import urllib.request
@@ -99,8 +98,20 @@ _SUBTASK_CONSTRAINT = (
     "execute, or verify tests, since that happens automatically, for "
     "real, in a separate stage after every subtask here is implemented."
 )
-_PLAN_TOOL_DESCRIPTION = f"Emit the structured plan for this run. {_SUBTASK_CONSTRAINT}"
-_RE_PLAN_TOOL_DESCRIPTION = f"Emit the structured, revised plan for this run. {_SUBTASK_CONSTRAINT}"
+# Real live-run bug this closes (see ollama_backend.PLAN_OUTPUT_SCHEMA's
+# scope_in/scope_out comment for the full story): a plan populated
+# scope_in with prose feature descriptions instead of the real file
+# path(s) the run actually touched, so `checkpoints.check_risk`'s literal
+# set-difference flagged the run's own primary deliverable as "out of
+# scope" and fired a real, avoidable Section 9.3 risk checkpoint.
+_SCOPE_CONSTRAINT = (
+    "scope_in and scope_out must be real, literal file paths (e.g. "
+    "'tetris.html', 'src/app.py') -- never prose feature descriptions -- "
+    "since the file(s) this plan's own deliverable requires must always "
+    "be listed as real paths in scope_in."
+)
+_PLAN_TOOL_DESCRIPTION = f"Emit the structured plan for this run. {_SUBTASK_CONSTRAINT} {_SCOPE_CONSTRAINT}"
+_RE_PLAN_TOOL_DESCRIPTION = f"Emit the structured, revised plan for this run. {_SUBTASK_CONSTRAINT} {_SCOPE_CONSTRAINT}"
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +408,7 @@ class AnthropicAgentBackend(AgentBackend):
                     status_code=e.code,
                     body=body,
                 ) from e
-            except (urllib.error.URLError, socket.timeout, ConnectionRefusedError, TimeoutError) as e:
+            except (urllib.error.URLError, ConnectionRefusedError, TimeoutError) as e:
                 # URLError wraps connection-refused/DNS failure and
                 # socket.timeout wraps "connected but never responded in
                 # time" -- both are transient, retried the same way.

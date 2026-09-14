@@ -70,7 +70,6 @@ from __future__ import annotations
 
 import copy
 import json
-import socket
 import time
 import urllib.error
 import urllib.request
@@ -81,9 +80,11 @@ from orchestrator.model_backend import AgentBackend, DiffOutput, PlanOutput, Sub
 from orchestrator.ollama_backend import (
     DIFF_OUTPUT_SCHEMA,
     PLAN_OUTPUT_SCHEMA,
-    MalformedResponseError as _OllamaMalformedResponseError,
     _diff_from_dict,
     _plan_from_dict,
+)
+from orchestrator.ollama_backend import (
+    MalformedResponseError as _OllamaMalformedResponseError,
 )
 
 DEFAULT_MODEL = "gpt-4.1"
@@ -220,7 +221,11 @@ _PLAN_SYSTEM_PROMPT = (
     "Every subtask must be a concrete code-authoring action (create, "
     "modify, or delete specific real files) -- never a subtask to run, "
     "execute, or verify tests, since that happens automatically, for "
-    "real, in a separate stage after every subtask here is implemented."
+    "real, in a separate stage after every subtask here is implemented. "
+    "scope_in and scope_out must be real, literal file paths (e.g. "
+    "'tetris.html', 'src/app.py') -- never prose feature descriptions -- "
+    "since the file(s) this plan's own deliverable requires must always "
+    "be listed as real paths in scope_in."
 )
 
 _IMPLEMENT_SYSTEM_PROMPT = (
@@ -391,7 +396,7 @@ class OpenAIAgentBackend(AgentBackend):
                     status_code=e.code,
                     body=body,
                 ) from e
-            except (urllib.error.URLError, socket.timeout, ConnectionRefusedError, TimeoutError) as e:
+            except (urllib.error.URLError, ConnectionRefusedError, TimeoutError) as e:
                 # URLError wraps connection-refused/DNS failure; socket
                 # timeout wraps "accepted the connection but never
                 # responded in time" -- both are retried the same way.
