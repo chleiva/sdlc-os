@@ -301,6 +301,58 @@ def test_all_regions_exhausted_raises_bedrock_throttled_error(fake_client):
     assert len(fallback_client.call_log) == 2  # the fallback region got its own full budget too
 
 
+def test_falls_over_to_fallback_model_after_every_region_exhausted(fake_client):
+    """Real live-run finding this closes: region fallback alone wasn't
+    enough -- a persistently degraded *model*, not just a region, still
+    stalled every real call. Model-major, region-minor: every region is
+    tried for the PRIMARY model first, before downgrading to the
+    fallback model -- which reuses the very same region clients (a real
+    Bedrock client is region-bound, not model-bound; `modelId` is a
+    per-request field), so `fake_client` legitimately serves both the
+    primary model's first attempt and the fallback model's eventual
+    successful one."""
+    fallback_region_client = FakeBedrockRuntimeClient()
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockAgentBackend(
+        config, fake_client,
+        fallback_clients=[(fallback_region_client, "us-west-2")],
+        fallback_models=["cheap.low-cost-model-v1:0"],
+    )
+
+    for _ in range(2):  # primary model, primary region (fake_client)
+        fake_client.queue_response(_client_error("ThrottlingException", "slow down", http_status=429))
+    for _ in range(2):  # primary model, fallback region
+        fallback_region_client.queue_response(_client_error("ThrottlingException", "still slow", http_status=429))
+    # fallback model, back on the primary region's own client
+    fake_client.queue_response(converse_response_with_tool_call("emit_plan", _PLAN_INPUT))
+
+    plan = backend.author_plan(run_context={})
+    assert plan.outcomes == _PLAN_INPUT["outcomes"]
+    assert len(fake_client.call_log) == 3
+    assert len(fallback_region_client.call_log) == 2
+    assert [c["modelId"] for c in fake_client.call_log] == [_FAKE_MODEL_ID, _FAKE_MODEL_ID, "cheap.low-cost-model-v1:0"]
+    assert [c["modelId"] for c in fallback_region_client.call_log] == [_FAKE_MODEL_ID, _FAKE_MODEL_ID]
+
+
+def test_all_models_exhausted_raises_bedrock_throttled_error(fake_client):
+    """No region fallback configured here -- just a primary and one
+    fallback model, both against `fake_client` (model fallback reuses
+    the same client/region, only `modelId` changes -- see
+    `call_converse_with_retry`'s own docstring for why that's valid).
+    Both exhausting their own retry budget must still raise, never hang
+    or silently give up early."""
+    config = BedrockBackendConfig(model_id=_FAKE_MODEL_ID, max_retries=2, retry_backoff_seconds=0.01)
+    backend = BedrockAgentBackend(config, fake_client, fallback_models=["cheap.low-cost-model-v1:0"])
+
+    for _ in range(4):  # 2 attempts x 2 models, all against the one client
+        fake_client.queue_response(_client_error("ThrottlingException", "slow down", http_status=429))
+
+    with pytest.raises(BedrockThrottledError):
+        backend.author_plan(run_context={})
+    assert len(fake_client.call_log) == 4
+    assert [c["modelId"] for c in fake_client.call_log] == [_FAKE_MODEL_ID, _FAKE_MODEL_ID, "cheap.low-cost-model-v1:0", "cheap.low-cost-model-v1:0"]
+
+
 def test_access_denied_never_falls_over_to_a_fallback_region(fake_client):
     """A real credentials/permissions problem is not fixed by trying a
     different region -- must raise immediately, never touching the

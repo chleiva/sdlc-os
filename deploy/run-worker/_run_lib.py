@@ -199,6 +199,19 @@ def _build_environment(
     # `bedrock_backend.call_converse_with_retry`'s own docstring for
     # the real fallback+sticky-region mechanism this feeds.
     fallback_regions = [r.strip() for r in os.environ.get("BEDROCK_FALLBACK_REGIONS", "").split(",") if r.strip()]
+    # (New) real live-run finding: region fallback alone wasn't enough --
+    # a persistently degraded *model*, not just a region, still stalled
+    # every real call for minutes at a time. Comma-separated real Bedrock
+    # model ids to fall over to (see `bedrock_backend.call_converse_with_retry`
+    # for the mechanics: every region above is tried for the currently-
+    # preferred model before downgrading to the next one here). Deliberately
+    # the operator's own choice, not this codebase's: list ONLY models
+    # you've deliberately picked as acceptable low-cost fallbacks (never
+    # the expensive primary model itself), ordered best-quality-first
+    # among that low-cost set -- this env var does not know what any
+    # model costs or how good it is, it only tries entries in the order
+    # given.
+    fallback_models = [m.strip() for m in os.environ.get("BEDROCK_FALLBACK_MODELS", "").split(",") if m.strip()]
     repository = os.environ.get("LIVE_RUN_REPOSITORY", "chleiva/returnby")
     tenant_id = os.environ.get("LIVE_RUN_TENANT_ID", "live-run-tenant")
     max_turns_env = os.environ.get("BEDROCK_MAX_TURNS", "").strip()
@@ -272,6 +285,9 @@ def _build_environment(
     if fallback_clients:
         print(f"[run] Real Bedrock fallback regions configured: {[r for _, r in fallback_clients]}")
     agent_backend_kwargs: dict = {"fallback_clients": fallback_clients} if fallback_clients else {}
+    if fallback_models:
+        print(f"[run] Real Bedrock fallback models configured: {fallback_models}")
+        agent_backend_kwargs["fallback_models"] = fallback_models
     if max_turns is not None:
         agent_backend_kwargs["max_turns"] = max_turns
     # (New) real inputs for genuine parallel subtask execution

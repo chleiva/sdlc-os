@@ -405,19 +405,30 @@ def _call_with_soft_timeout(client: Any, request_kwargs: dict, *, timeout_second
 def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, config: BedrockBackendConfig) -> dict:
     """`call_converse_with_retry`'s real retry-with-backoff loop against
     exactly one region/client -- see that function for the public
-    entrypoint, which wraps this with region fallback."""
+    entrypoint, which wraps this with region and model fallback."""
     response: dict | None = None
     last_transient_summary: str | None = None
 
     for attempt in range(config.max_retries):
+        # Real timing this closes a real observability gap with: before
+        # this, a slow/stuck run was a black box -- no log anywhere said
+        # how long a single Converse call actually took, so diagnosing
+        # "why did this run take hours" meant guessing. One real
+        # wall-clock measurement per attempt, logged whether it succeeds
+        # or fails, is enough to tell a genuinely slow model/region apart
+        # from a throttling storm from a plain hang -- see `_TurnTimer`
+        # (tool_use_bedrock_backend.py) for the matching per-turn/
+        # per-subtask rollup this feeds into the implementation loop.
+        attempt_started = time.monotonic()
         try:
             response = _call_with_soft_timeout(client, request_kwargs, timeout_seconds=config.timeout_seconds)
         except concurrent.futures.TimeoutError as e:
             last_transient_summary = f"call timed out after {config.timeout_seconds}s"
             if attempt < config.max_retries - 1:
                 logger.warning(
-                    "Bedrock converse call to model %r timed out (attempt %d/%d); retrying",
+                    "Bedrock converse call to model %r timed out after %.1fs (attempt %d/%d); retrying",
                     config.model_id,
+                    time.monotonic() - attempt_started,
                     attempt + 1,
                     config.max_retries,
                 )
@@ -448,9 +459,10 @@ def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, c
                 last_transient_summary = f"{code}: {message}"
                 if attempt < config.max_retries - 1:
                     logger.warning(
-                        "Bedrock converse call to model %r hit %s (attempt %d/%d); retrying",
+                        "Bedrock converse call to model %r hit %s after %.1fs (attempt %d/%d); retrying",
                         config.model_id,
                         code,
+                        time.monotonic() - attempt_started,
                         attempt + 1,
                         config.max_retries,
                     )
@@ -481,8 +493,9 @@ def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, c
             last_transient_summary = str(e)
             if attempt < config.max_retries - 1:
                 logger.warning(
-                    "Bedrock converse call to model %r hit a connection error (attempt %d/%d); retrying",
+                    "Bedrock converse call to model %r hit a connection error after %.1fs (attempt %d/%d); retrying",
                     config.model_id,
+                    time.monotonic() - attempt_started,
                     attempt + 1,
                     config.max_retries,
                 )
@@ -494,6 +507,10 @@ def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, c
                 f"{config.max_retries} attempt(s): connection error: {last_transient_summary}"
             ) from e
         else:
+            logger.info(
+                "Bedrock converse call to model %r in region %r succeeded in %.1fs (attempt %d/%d)",
+                config.model_id, config.region_name, time.monotonic() - attempt_started, attempt + 1, config.max_retries,
+            )
             break
     else:  # pragma: no cover - loop always returns/raises above
         raise BedrockThrottledError(
@@ -508,71 +525,106 @@ def _call_converse_with_retry_one_region(*, client: Any, request_kwargs: dict, c
 def call_converse_with_retry(
     *, client: Any, request_kwargs: dict, config: BedrockBackendConfig,
     fallback_clients: list[tuple[Any, str]] | None = None,
+    fallback_models: list[str] | None = None,
     sticky_state: dict | None = None,
 ) -> dict:
     """Call `bedrock-runtime`'s real `converse` operation against
-    `client`/`config.region_name`, retrying with exponential backoff on
-    a soft timeout, Bedrock's own throttling/transient error codes, or a
-    connection-level `BotoCoreError` (including `ReadTimeoutError`/
-    `ConnectTimeoutError` -- both real `BotoCoreError` subclasses).
-    Never retries an access-denied code (retrying with the same
-    credentials changes nothing) or any other `ClientError` (a defect
-    in the request itself, not a transient condition).
+    `client`/`config.region_name`/`config.model_id`, retrying with
+    exponential backoff on a soft timeout, Bedrock's own throttling/
+    transient error codes, or a connection-level `BotoCoreError`
+    (including `ReadTimeoutError`/`ConnectTimeoutError` -- both real
+    `BotoCoreError` subclasses). Never retries an access-denied code
+    (retrying with the same credentials changes nothing) or any other
+    `ClientError` (a defect in the request itself, not a transient
+    condition).
 
-    `fallback_clients` (New -- real live-run finding: a persistent
-    regional Bedrock slowdown/outage exhausted every retry in one
-    region on a real run): additional real `(client, region_name)`
-    pairs, each a real `boto3.client("bedrock-runtime", region_name=...)`
-    for a region that also serves this same model. If the primary
-    region exhausts its own `max_retries` (a real `BedrockThrottledError`),
-    this tries each fallback region in turn, each getting its own full
-    retry budget, before finally giving up. Never falls over on
-    `BedrockAccessDeniedError`/`BedrockInvocationError` -- those mean
-    the request or credentials are the problem, not the region, and
-    retrying the identical request against a different region would not
-    change that.
+    `fallback_clients` (real live-run finding: a persistent regional
+    Bedrock slowdown/outage exhausted every retry in one region on a
+    real run): additional real `(client, region_name)` pairs, each a
+    real `boto3.client("bedrock-runtime", region_name=...)` for a
+    region that also serves the model currently being tried.
 
-    `sticky_state` (New): a small caller-owned `dict` (e.g.
-    `{"index": 0}`, one per `BedrockAgentBackend`/
-    `BedrockToolUseAgentBackend` instance, persisting across every real
-    Converse call that instance makes) this function reads its starting
-    region from and updates on success. Without this, a multi-turn
-    session (the implementation loop) would retry the *dead* primary
-    region's full budget again on every single turn even after a
-    fallback region already proved to work -- wasteful (this session's
-    real default: up to 180s x 3 wasted, every turn) and pointless once
-    one real outage is already known. With it, a fallback that
-    succeeded once becomes this instance's new preferred region for
-    every subsequent call, and only falls back further (or back to the
-    original) if that region itself later fails too.
+    `fallback_models` (New -- real live-run finding: even with region
+    fallback, a persistently degraded *model* -- not just a region --
+    still stalled every real call for minutes at a time): additional
+    real Bedrock model ids to fall over to, in the given order, once
+    every region has been tried for the current model. Deliberately
+    model-major, region-minor (every region is tried for the best/
+    currently-preferred model before downgrading to the next one) --
+    see this function's docstring for `sticky_state` for why downgrading
+    is a last resort, not a first one. The operator is expected to list
+    only real, deliberately-chosen low-cost models here, ordered
+    best-quality-first among that low-cost set (see `_run_lib.py`'s
+    `BEDROCK_FALLBACK_MODELS` comment) -- this function has no notion of
+    "cost" or "quality" itself, it only tries entries in the order
+    given, so that ordering decision is entirely the caller's.
+
+    Never falls over (region or model) on `BedrockAccessDeniedError`/
+    `BedrockInvocationError` -- those mean the request or credentials
+    are the problem, not the region/model, and retrying the identical
+    request elsewhere would not change that.
+
+    `sticky_state`: a small caller-owned `dict` (e.g. `{"index": 0}`,
+    one per `BedrockAgentBackend`/`BedrockToolUseAgentBackend` instance,
+    persisting across every real Converse call that instance makes)
+    this function reads its starting (region, model) combination from
+    and updates on success. Without this, a multi-turn session (the
+    implementation loop) would retry the *dead* primary combination's
+    full budget again on every single turn even after a fallback
+    already proved to work -- wasteful (this session's real default: up
+    to 180s x 3 wasted, every turn) and pointless once one real outage
+    is already known. With it, a fallback that succeeded once becomes
+    this instance's new preferred combination for every subsequent
+    call, and only falls back further (or back to the original) if that
+    combination itself later fails too -- including, now, falling back
+    to a cheaper model and staying there rather than re-trying the
+    better one on every call; that trade-off (never automatically
+    recovering back "up" to a pricier model once downgraded, within one
+    instance's lifetime) is deliberate, matching the existing
+    region-sticky behavior, not an oversight.
 
     Returns the raw Converse API response dict -- callers extract
     whatever shape they need from it (a single forced tool call's
     input, or a multi-turn tool-use message)."""
-    attempts: list[tuple[Any, BedrockBackendConfig]] = [(client, config)]
-    for fallback_client, fallback_region in fallback_clients or []:
-        attempts.append((fallback_client, dataclasses.replace(config, region_name=fallback_region)))
+    region_attempts: list[tuple[Any, str]] = [(client, config.region_name)] + list(fallback_clients or [])
+    model_ids: list[str] = [config.model_id] + [m for m in (fallback_models or []) if m != config.model_id]
+
+    attempts: list[tuple[Any, BedrockBackendConfig, str]] = [
+        (attempt_client, dataclasses.replace(config, region_name=region, model_id=model_id), model_id)
+        for model_id in model_ids
+        for attempt_client, region in region_attempts
+    ]
 
     start = (sticky_state.get("index", 0) % len(attempts)) if sticky_state is not None else 0
     order = list(range(start, len(attempts))) + list(range(start))
 
+    overall_started = time.monotonic()
     last_error: BedrockThrottledError | None = None
     for position, index in enumerate(order):
-        attempt_client, attempt_config = attempts[index]
+        attempt_client, attempt_config, attempt_model_id = attempts[index]
+        attempt_request_kwargs = (
+            request_kwargs if attempt_model_id == request_kwargs.get("modelId") else {**request_kwargs, "modelId": attempt_model_id}
+        )
         try:
-            response = _call_converse_with_retry_one_region(client=attempt_client, request_kwargs=request_kwargs, config=attempt_config)
+            response = _call_converse_with_retry_one_region(client=attempt_client, request_kwargs=attempt_request_kwargs, config=attempt_config)
         except BedrockThrottledError as e:
             last_error = e
             if position < len(order) - 1:
-                next_region = attempts[order[position + 1]][1].region_name
+                next_client, next_config, next_model_id = attempts[order[position + 1]]
                 logger.warning(
-                    "Bedrock region %r exhausted its own retry budget; falling over to region %r",
-                    attempt_config.region_name, next_region,
+                    "Bedrock region %r / model %r exhausted its own retry budget after %.1fs total; falling over to region %r / model %r",
+                    attempt_config.region_name, attempt_model_id, time.monotonic() - overall_started,
+                    next_config.region_name, next_model_id,
                 )
             continue
 
         if sticky_state is not None:
             sticky_state["index"] = index
+        if position > 0:
+            logger.warning(
+                "Bedrock call recovered on region %r / model %r after falling back %d time(s), %.1fs total",
+                attempt_config.region_name, attempt_model_id, position, time.monotonic() - overall_started,
+            )
         return response
 
     assert last_error is not None  # for type-checkers; unreachable otherwise (attempts always has >=1 entry)
@@ -589,7 +641,14 @@ class BedrockAgentBackend(AgentBackend):
     `Converse` API. See module docstring for what's real vs. mocked, the
     structured-output mechanism, and why `model_id` has no default."""
 
-    def __init__(self, config: BedrockBackendConfig, client: Any, *, fallback_clients: list[tuple[Any, str]] | None = None) -> None:
+    def __init__(
+        self,
+        config: BedrockBackendConfig,
+        client: Any,
+        *,
+        fallback_clients: list[tuple[Any, str]] | None = None,
+        fallback_models: list[str] | None = None,
+    ) -> None:
         """`client` is a dependency-injected object implementing the same
         `.converse(**kwargs) -> dict` call signature as a real `boto3`
         `bedrock-runtime` client (constructed by the caller, e.g.
@@ -600,14 +659,20 @@ class BedrockAgentBackend(AgentBackend):
         never reads AWS credentials, environment variables, or shared
         config itself -- see module docstring.
 
-        `fallback_clients` (New): additional real `(client, region_name)`
+        `fallback_clients`: additional real `(client, region_name)`
         pairs -- caller-constructed, same discipline as `client` above
         -- to fail over to, in order, if `client`/`config.region_name`
-        exhausts its own retry budget. See `call_converse_with_retry`."""
+        exhausts its own retry budget.
+
+        `fallback_models` (New): additional real Bedrock model ids to
+        fall over to (each tried across every region above) once the
+        currently-preferred model exhausts every region. See
+        `call_converse_with_retry`'s own docstring for both."""
         self._config = config
         self._client = client
         self._fallback_clients = fallback_clients or []
-        # One instance, one sticky region preference -- see
+        self._fallback_models = fallback_models or []
+        # One instance, one sticky (region, model) preference -- see
         # `call_converse_with_retry`'s own docstring for why.
         self._sticky_state: dict = {"index": 0}
 
@@ -702,7 +767,8 @@ class BedrockAgentBackend(AgentBackend):
         }
         response = call_converse_with_retry(
             client=self._client, request_kwargs=request_kwargs, config=self._config,
-            fallback_clients=self._fallback_clients, sticky_state=self._sticky_state,
+            fallback_clients=self._fallback_clients, fallback_models=self._fallback_models,
+            sticky_state=self._sticky_state,
         )
         return self._extract_tool_input(response, tool_name=tool_name)
 

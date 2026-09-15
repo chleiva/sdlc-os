@@ -30,7 +30,8 @@ from orchestrator.model_backend import SubTask
 from orchestrator.tool_use_bedrock_backend import (
     BedrockAgenticLoopExhaustedError,
     BedrockToolUseAgentBackend,
-    _max_turns_for_story_size,
+    _hard_turn_cap_for_story_size,
+    _soft_turn_target_for_story_size,
 )
 from tests.fake_bedrock_client import (
     FakeBedrockRuntimeClient,
@@ -106,6 +107,75 @@ def test_read_then_write_then_finish_is_a_real_multi_turn_loop(backend, fake_cli
     assert diff.files_touched == ("README.md",)
     assert (git_fixture_repo / "README.md").read_text() == "# fixture\nupdated\n"
     assert len(fake_client.call_log) == 3  # read, write, finish -- three real converse calls
+
+
+def test_edit_file_makes_a_real_targeted_change_without_rewriting_the_rest(backend, fake_client, git_fixture_repo):
+    """The real live-run finding this tool closes: a targeted edit_file
+    call must change only the matched text, leaving the rest of the
+    file's real content on disk untouched -- never a full regeneration."""
+    (git_fixture_repo / "README.md").write_text("# fixture\nline one\nline two\nline three\n")
+    # Committed as this subtask's real starting point (HEAD) -- so the
+    # diff `implement_subtask` reports afterward isolates exactly what
+    # edit_file changed, not this setup write too.
+    subprocess.run(["git", "add", "README.md"], cwd=git_fixture_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "test setup: four-line README"], cwd=git_fixture_repo, check=True)
+    fake_client.queue_response(converse_response_with_tool_call("edit_file", {"path": "README.md", "old_str": "line two", "new_str": "line TWO edited"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "edit line two", "summary": "s"}))
+
+    diff = backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="edit README", parallel_group=None, depends_on=()),
+    )
+
+    assert (git_fixture_repo / "README.md").read_text() == "# fixture\nline one\nline TWO edited\nline three\n"
+    assert diff.files_touched == ("README.md",)
+    assert diff.lines_changed == 2  # one real line removed, one real line added -- not a whole-file rewrite
+
+
+def test_edit_file_missing_file_reports_a_real_tool_error_not_a_crash(backend, fake_client, git_fixture_repo):
+    """edit_file against a nonexistent file must not raise out of the
+    loop -- it comes back as a real tool-result error (like every other
+    `_execute_tool` failure mode), giving the model a real chance to
+    recover within its own turn budget (here: falling back to
+    write_file for the new file), never crashing the whole subtask."""
+    fake_client.queue_response(converse_response_with_tool_call("edit_file", {"path": "does_not_exist.py", "old_str": "x", "new_str": "y"}))
+    fake_client.queue_response(converse_response_with_tool_call("write_file", {"path": "does_not_exist.py", "content": "y\n"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "create it instead", "summary": "s"}))
+
+    diff = backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="create a file", parallel_group=None, depends_on=()),
+    )
+    assert diff.files_touched == ("does_not_exist.py",)
+    assert (git_fixture_repo / "does_not_exist.py").read_text() == "y\n"
+    # three real turns happened (failed edit_file, recovering write_file,
+    # finish) -- proof the failed edit_file was recoverable, not fatal.
+    assert len(fake_client.call_log) == 3
+
+
+def test_edit_file_requires_old_str_to_be_unique_unless_replace_all(backend, fake_client, git_fixture_repo):
+    (git_fixture_repo / "README.md").write_text("dup\ndup\n")
+    fake_client.queue_response(converse_response_with_tool_call("edit_file", {"path": "README.md", "old_str": "dup", "new_str": "single"}))
+    fake_client.queue_response(converse_response_with_tool_call("edit_file", {"path": "README.md", "old_str": "dup", "new_str": "both", "replace_all": True}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "replace all", "summary": "s"}))
+
+    backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="dedupe", parallel_group=None, depends_on=()),
+    )
+    assert (git_fixture_repo / "README.md").read_text() == "both\nboth\n"
+
+
+def test_edit_file_rejects_a_no_op_edit(backend, fake_client, git_fixture_repo):
+    fake_client.queue_response(converse_response_with_tool_call("edit_file", {"path": "README.md", "old_str": "fixture", "new_str": "fixture"}))
+    fake_client.queue_response(converse_response_with_tool_call("edit_file", {"path": "README.md", "old_str": "fixture", "new_str": "real edit"}))
+    fake_client.queue_response(converse_response_with_tool_call("finish", {"commit_message": "real edit", "summary": "s"}))
+
+    backend.implement_subtask(
+        run_context={"run_id": "r1", "story_size": "S"},
+        subtask=SubTask(task_id="t1", description="edit README", parallel_group=None, depends_on=()),
+    )
+    assert (git_fixture_repo / "README.md").read_text() == "# real edit\n"
 
 
 def test_a_malformed_tool_call_missing_a_required_field_does_not_crash_the_run(backend, fake_client, git_fixture_repo):
@@ -243,11 +313,13 @@ def test_implementation_loop_falls_over_to_a_fallback_region_too(fake_client, gi
 
 
 def test_never_calling_finish_raises_within_the_derived_turn_budget(fake_client, git_fixture_repo):
-    """An "S"-sized story derives a small, real turn budget (see
-    `_max_turns_for_story_size`) -- queue one more list_files response
-    than that budget allows and confirm the loop stops there, raising
-    rather than looping forever or silently accepting non-completion."""
-    expected_max_turns = _max_turns_for_story_size("S")
+    """An "S"-sized story derives a small, real hard turn cap (see
+    `_hard_turn_cap_for_story_size` -- the loop's actual bound, looser
+    than the soft target the model is told, per `_HARD_CAP_MULTIPLIER`'s
+    own comment) -- queue one more list_files response than that cap
+    allows and confirm the loop stops there, raising rather than looping
+    forever or silently accepting non-completion."""
+    expected_max_turns = _hard_turn_cap_for_story_size("S")
     for _ in range(expected_max_turns + 2):  # more than enough queued responses
         fake_client.queue_response(converse_response_with_tool_call("list_files", {"path": "."}))
 
@@ -403,26 +475,41 @@ class TestImplementSubtasksParallel:
 
 
 class TestMaxTurnsForStorySize:
-    """`_max_turns_for_story_size` (see its own docstring for the
+    """`_soft_turn_target_for_story_size` (see its own docstring for the
     real-anchor rationale): larger declared story sizes derive
-    proportionally larger turn budgets, and an unknown/missing size
+    proportionally larger turn targets, and an unknown/missing size
     falls back to a fixed, documented default rather than raising."""
 
     def test_larger_sizes_derive_larger_budgets(self):
-        s, m, l = (_max_turns_for_story_size(size) for size in ("S", "M", "L"))
+        s, m, l = (_soft_turn_target_for_story_size(size) for size in ("S", "M", "L"))
         assert s < m < l
 
     def test_derivation_is_proportional_to_the_real_wall_clock_budget(self):
         # Same seconds-per-turn/fraction assumptions apply to every size,
         # so the ratio between derived turn counts must match the ratio
         # between the real Sec. 9.4 wall_clock_minutes budgets exactly.
-        s_turns = _max_turns_for_story_size("S")
-        m_turns = _max_turns_for_story_size("M")
+        s_turns = _soft_turn_target_for_story_size("S")
+        m_turns = _soft_turn_target_for_story_size("M")
         s_minutes = DEFAULT_BUDGETS["S"].wall_clock_minutes
         m_minutes = DEFAULT_BUDGETS["M"].wall_clock_minutes
         assert m_turns / s_turns == pytest.approx(m_minutes / s_minutes, rel=0.05)
 
     def test_unknown_or_missing_size_falls_back_rather_than_raising(self):
-        assert _max_turns_for_story_size(None) > 0
-        assert _max_turns_for_story_size("XL") > 0  # DEFAULT_BUDGETS["XL"] is None -- must not KeyError/crash
-        assert _max_turns_for_story_size("not-a-real-size") > 0
+        assert _soft_turn_target_for_story_size(None) > 0
+        assert _soft_turn_target_for_story_size("XL") > 0  # DEFAULT_BUDGETS["XL"] is None -- must not KeyError/crash
+        assert _soft_turn_target_for_story_size("not-a-real-size") > 0
+
+
+class TestHardTurnCapForStorySize:
+    """`_hard_turn_cap_for_story_size` -- the loop's actual bound, a
+    fixed multiple of the soft target above (see `_HARD_CAP_MULTIPLIER`'s
+    own comment for why the two are deliberately different numbers)."""
+
+    def test_hard_cap_is_the_multiplier_times_the_soft_target(self):
+        from orchestrator.tool_use_bedrock_backend import _HARD_CAP_MULTIPLIER
+
+        for size in ("S", "M", "L", "XL", None, "not-a-real-size"):
+            soft = _soft_turn_target_for_story_size(size)
+            hard = _hard_turn_cap_for_story_size(size)
+            assert hard == max(1, int(soft * _HARD_CAP_MULTIPLIER))
+            assert hard >= soft

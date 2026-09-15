@@ -38,8 +38,8 @@ established discipline)**: it does not run tests/lint/security-scan
 during implementation (that is D7's `VerificationRunner`'s job, called
 by `core.py` at the next stage -- see `real_verification_runner.py`); it
 does not execute arbitrary shell commands (no `run_command` tool is
-offered -- only read/write/list, deliberately, to keep this first real
-pass's blast radius to "file contents in the worktree", not "arbitrary
+offered -- only read/write/edit/list, deliberately, to keep this first
+real pass's blast radius to "file contents in the worktree", not "arbitrary
 code execution" -- a real `run_command` tool routed through the already-
 real `docker_sandbox.DockerContainerSandboxRuntime` is a natural, scoped
 follow-up, not built here); and it is Bedrock-specific -- the equivalent
@@ -109,6 +109,7 @@ from orchestrator.worktree import (
 
 _READ_FILE_TOOL = "read_file"
 _WRITE_FILE_TOOL = "write_file"
+_EDIT_FILE_TOOL = "edit_file"
 _LIST_FILES_TOOL = "list_files"
 _FINISH_TOOL = "finish"
 
@@ -139,6 +140,51 @@ _TOOL_SPECS = [
                         "content": {"type": "string", "description": "The complete new content of the file."},
                     },
                     "required": ["path", "content"],
+                    "additionalProperties": False,
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": _EDIT_FILE_TOOL,
+            # Real live-run finding this tool closes: every edit, however
+            # small, had to go through write_file's full-file-content
+            # contract, which meant regenerating an entire existing file
+            # (sometimes thousands of tokens) to change a handful of
+            # lines -- real, measured generation time and diff size, not
+            # just an inefficiency in the abstract (see
+            # `checkpoints.size_budget_prompt_text`'s own real-live-run
+            # finding: a story sized "L" still produced a 2083-line diff
+            # across 2 files, largely from this). Prefer this tool for
+            # any change to a file that already exists.
+            "description": (
+                "Make a targeted edit to an EXISTING file by replacing one exact occurrence of "
+                "old_str with new_str, without touching the rest of the file. old_str must match "
+                "the file's current real content exactly (including whitespace/indentation) and "
+                "must be unique in the file unless replace_all is true -- read_file first if "
+                "unsure of the exact current text. Strongly preferred over write_file for any "
+                "change to a file that already exists (a real bug fix, a small addition, updating "
+                "one call site): write_file regenerates the ENTIRE file and is reserved for "
+                "genuinely new files, or an existing file being restructured so heavily that a "
+                "full rewrite is honestly simpler than a series of targeted edits."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path relative to the workspace root. The file must already exist."},
+                        "old_str": {
+                            "type": "string",
+                            "description": "The exact existing text to replace (including whitespace/indentation) -- must appear in the file verbatim.",
+                        },
+                        "new_str": {"type": "string", "description": "The text to replace it with. Must differ from old_str."},
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace every occurrence of old_str instead of requiring exactly one match. Defaults to false.",
+                        },
+                    },
+                    "required": ["path", "old_str", "new_str"],
                     "additionalProperties": False,
                 }
             },
@@ -179,24 +225,32 @@ _TOOL_SPECS = [
 
 _SYSTEM_PROMPT = (
     "You are the implementation stage of an autonomous coding agent. You "
-    "have real read_file/write_file/list_files tools against a real git "
-    "worktree -- use them to actually implement the subtask described "
-    "below. Work in small, real steps: list files to orient yourself if "
-    "needed, read a file before overwriting it if it might already have "
-    "relevant content, write complete file contents (not a diff/patch "
-    "fragment) with write_file. When the subtask is genuinely done, call "
+    "have real read_file/write_file/edit_file/list_files tools against a "
+    "real git worktree -- use them to actually implement the subtask "
+    "described below. Work in small, real steps: list files to orient "
+    "yourself if needed, read a file before changing it if unsure of its "
+    "exact current content.\n\n"
+    "Prefer edit_file over write_file for any change to a file that "
+    "already exists: edit_file replaces one exact, unique occurrence of "
+    "old_str with new_str and leaves the rest of the file untouched, so "
+    "a small fix stays a small diff. Reserve write_file for genuinely "
+    "new files, or an existing file being restructured so heavily that a "
+    "full rewrite is honestly simpler than several targeted edits -- "
+    "regenerating a whole existing file for a small change wastes real "
+    "time and produces a needlessly large diff against this story's own "
+    "size budget (see below). When the subtask is genuinely done, call "
     "finish exactly once with a real commit message -- never before the "
     "actual file changes are made, and never more than once.\n\n"
     "You have no tool to execute code, run a test suite, or run any "
-    "shell command -- only read_file/write_file/list_files/finish. Never "
-    "create a script or helper file whose purpose is to run or verify "
-    "tests (e.g. a 'run_tests.sh'/'test_runner.py'-style file); doing so "
-    "achieves nothing (you cannot execute it either) and, if its name "
-    "matches pytest's own test-discovery pattern, actively breaks the "
-    "real automated test run that happens after you finish. If you are "
-    "asked to fix a previously-reported verification failure, edit "
-    "exactly the file(s) the failure names to fix the real defect -- "
-    "never respond by adding test-execution tooling."
+    "shell command -- only read_file/write_file/edit_file/list_files/"
+    "finish. Never create a script or helper file whose purpose is to "
+    "run or verify tests (e.g. a 'run_tests.sh'/'test_runner.py'-style "
+    "file); doing so achieves nothing (you cannot execute it either) "
+    "and, if its name matches pytest's own test-discovery pattern, "
+    "actively breaks the real automated test run that happens after you "
+    "finish. If you are asked to fix a previously-reported verification "
+    "failure, edit exactly the file(s) the failure names to fix the "
+    "real defect -- never respond by adding test-execution tooling."
 )
 
 
@@ -242,26 +296,63 @@ _SUBTASK_BUDGET_FRACTION = 1.0 / 3.0
 #: derived value below, not a new independent guess.
 _FALLBACK_MAX_TURNS = 40
 
+#: Real design fix (not a bug): this number used to be BOTH the target
+#: the model was implicitly held to AND the loop's own hard-stop bound,
+#: identical. Those are two different concerns that shouldn't share one
+#: tight number: a subtask genuinely still making real progress at turn
+#: N (slower than `_ASSUMED_SECONDS_PER_TURN` assumed, not stuck) got
+#: killed -- `BedrockAgenticLoopExhaustedError` -- for being merely
+#: slower than estimated, and (a separate real gap, not fixed by this
+#: alone) that failure is today silently retried from scratch on the
+#: next poll tick rather than surfaced as a checkpoint, repeating the
+#: exact same waste. The fix: `_soft_turn_target_for_story_size` below
+#: is what the model is actually told (in `implement_subtask`'s own
+#: system-prompt addendum, alongside the size budget) -- a real,
+#: context-communicated pacing target, not a number it never sees --
+#: while the loop's real bound is that target multiplied by this
+#: constant, purely as a circuit breaker against a genuinely runaway/
+#: stuck loop (the exact real failure `BedrockAgenticLoopExhaustedError`
+#: was built to catch -- a plan authoring a "run tests" subtask this
+#: agent can never complete). 3x leaves real, generous headroom for a
+#: subtask that is honestly just slower than assumed, while still
+#: terminating a truly pathological loop in finite time rather than
+#: never at all. An explicit `BEDROCK_MAX_TURNS` override (operator
+#: intent, not a derived estimate) is used exactly as given for both --
+#: no multiplier applied to a number a human explicitly chose.
+_HARD_CAP_MULTIPLIER = 3.0
 
-def _max_turns_for_story_size(story_size: str | None) -> int:
-    """Derive the per-subtask tool-calling turn cap from the plan's own
-    declared Sec. 9.4 budget for its story size, instead of one flat
-    constant applied to every size alike. Real live-run finding this
-    replaces: turn caps used to be picked as a "reasonable-sounding"
-    integer (20, then 40) with no real justification for that specific
-    number -- an "S" one-file change and an "L" multi-file change got
-    the identical allowance. This ties the cap to the one number in this
-    codebase that already reflects real, agreed-upon per-size resource
-    limits (`checkpoints.DEFAULT_BUDGETS`'s wall_clock_minutes), via the
-    two explicit assumptions above (`_ASSUMED_SECONDS_PER_TURN`,
+
+def _soft_turn_target_for_story_size(story_size: str | None) -> int:
+    """The turn count `implement_subtask` tells the model to aim for --
+    derived from the plan's own declared Sec. 9.4 budget for its story
+    size, instead of one flat constant applied to every size alike (a
+    real live-run finding this replaces: turn caps used to be picked as
+    a "reasonable-sounding" integer -- 20, then 40 -- with no real
+    justification for that specific number, and an "S" one-file change
+    and an "L" multi-file change got the identical allowance). Ties the
+    target to the one number in this codebase that already reflects
+    real, agreed-upon per-size resource limits
+    (`checkpoints.DEFAULT_BUDGETS`'s wall_clock_minutes), via the two
+    explicit assumptions above (`_ASSUMED_SECONDS_PER_TURN`,
     `_SUBTASK_BUDGET_FRACTION`) -- still a heuristic (real per-turn
-    latency is genuinely variable), but now an anchored, size-proportional
-    one rather than an arbitrary guess repeated for every size."""
+    latency is genuinely variable), but an anchored, size-proportional
+    one rather than an arbitrary guess repeated for every size. See
+    `_HARD_CAP_MULTIPLIER`'s own comment for why this is a soft target
+    communicated to the model, not the loop's actual hard bound."""
     budget = DEFAULT_BUDGETS.get(story_size or "") if story_size else None
     if budget is None:
         return _FALLBACK_MAX_TURNS
     subtask_seconds = budget.wall_clock_minutes * 60 * _SUBTASK_BUDGET_FRACTION
     return max(1, int(subtask_seconds // _ASSUMED_SECONDS_PER_TURN))
+
+
+def _hard_turn_cap_for_story_size(story_size: str | None) -> int:
+    """The loop's actual hard-stop bound -- see `_HARD_CAP_MULTIPLIER`'s
+    own comment for why this is deliberately looser than the soft target
+    above, purely a circuit breaker against a genuinely runaway/stuck
+    loop, not a number the model is expected to bump against in the
+    normal case."""
+    return max(1, int(_soft_turn_target_for_story_size(story_size) * _HARD_CAP_MULTIPLIER))
 
 
 #: Real live-run bug this closes, the implementation-stage half of the
@@ -305,9 +396,12 @@ class BedrockToolUseAgentBackend(AgentBackend):
         *,
         workspace_root: Path,
         # Explicit override (e.g. BEDROCK_MAX_TURNS in live_run.py) --
-        # takes precedence over the size-derived value below when set.
-        # None (the default) means "derive it per-call from run_context
-        # ['story_size']" -- see `_max_turns_for_story_size`.
+        # takes precedence over the size-derived values below when set,
+        # used as-is for both the loop bound and the model's own pacing
+        # guidance (no `_HARD_CAP_MULTIPLIER` applied to explicit operator
+        # intent). None (the default) means "derive both per-call from
+        # run_context['story_size']" -- see `_soft_turn_target_for_story_size`
+        # / `_hard_turn_cap_for_story_size`.
         max_turns: int | None = None,
         # (New) real (client, region_name) pairs to fail over to if
         # `client`/`config.region_name` exhausts its own retry budget --
@@ -315,6 +409,14 @@ class BedrockToolUseAgentBackend(AgentBackend):
         # to the composed planning backend too, so a plan/re-plan call
         # gets the exact same regional resilience as implementation.
         fallback_clients: list[tuple[Any, str]] | None = None,
+        # (New) additional real Bedrock model ids (low-cost, ordered
+        # best-quality-first) to fall over to once every region above is
+        # exhausted for the currently-preferred model -- see
+        # `bedrock_backend.call_converse_with_retry`'s own docstring.
+        # Passed through to the composed planning backend and to every
+        # real parallel worker below too, same discipline as
+        # `fallback_clients`.
+        fallback_models: list[str] | None = None,
         # (New) real inputs for `implement_subtasks_parallel`'s genuine
         # concurrency: the real repo `worktree.create_agent_worktree`
         # branches new per-subtask worktrees off of, the directory they
@@ -332,18 +434,19 @@ class BedrockToolUseAgentBackend(AgentBackend):
         self._workspace_root = Path(workspace_root)
         self._max_turns_override = max_turns
         self._fallback_clients = fallback_clients or []
+        self._fallback_models = fallback_models or []
         self._repo_path = Path(repo_path) if repo_path is not None else None
         self._worktrees_root = Path(worktrees_root) if worktrees_root is not None else None
         self._base_ref = base_ref
-        # One instance, one sticky region preference (see
+        # One instance, one sticky (region, model) preference (see
         # `bedrock_backend.call_converse_with_retry`'s own docstring) --
         # separate from the composed planning backend's own, since
         # planning and implementation are different real Converse call
-        # sites that may legitimately land on different regions.
+        # sites that may legitimately land on different regions/models.
         self._sticky_state: dict = {"index": 0}
         # Planning delegates to the existing, already-real structured-output
         # backend -- composition, not reimplementation (see module docstring).
-        self._plan_backend = BedrockAgentBackend(config, client, fallback_clients=fallback_clients)
+        self._plan_backend = BedrockAgentBackend(config, client, fallback_clients=fallback_clients, fallback_models=fallback_models)
 
     # -- AgentBackend interface -------------------------------------------------
 
@@ -378,6 +481,27 @@ class BedrockToolUseAgentBackend(AgentBackend):
                     "actually requires."
                 )
 
+        # Real design fix -- see `_HARD_CAP_MULTIPLIER`'s own comment:
+        # the model is told the SOFT target (real pacing guidance,
+        # "dictated in context"), while `max_turns` below -- the loop's
+        # actual hard-stop bound -- stays deliberately looser, a circuit
+        # breaker rather than the number the model is expected to plan
+        # against. An explicit BEDROCK_MAX_TURNS override is operator
+        # intent, not a derived estimate, so it is used as-is for both.
+        if self._max_turns_override is not None:
+            max_turns = self._max_turns_override
+            turn_guidance_target = self._max_turns_override
+        else:
+            max_turns = _hard_turn_cap_for_story_size(story_size)
+            turn_guidance_target = _soft_turn_target_for_story_size(story_size)
+        system_text = system_text + (
+            f"\n\nAim to finish this subtask in about {turn_guidance_target} tool-calling turns "
+            "or fewer -- a rough real pacing target based on this story's own time budget, not a "
+            "hard limit you need to track exactly. If you are still meaningfully short of done well "
+            "beyond that, it is a real signal the subtask may be bigger than planned; keep making "
+            "real progress rather than padding turns, and call finish as soon as it genuinely is."
+        )
+
         user_prompt = (
             "Implement the following subtask for real, using the tools "
             "provided.\n\n"
@@ -386,8 +510,6 @@ class BedrockToolUseAgentBackend(AgentBackend):
             f"{json.dumps({'task_id': subtask.task_id, 'description': subtask.description, 'interface_contract': subtask.interface_contract}, indent=2)}"
         )
         messages: list[dict] = [{"role": "user", "content": [{"text": user_prompt}]}]
-
-        max_turns = self._max_turns_override or _max_turns_for_story_size(story_size)
 
         commit_message = ""
         for _turn in range(max_turns):
@@ -403,7 +525,7 @@ class BedrockToolUseAgentBackend(AgentBackend):
                 messages.append(
                     {
                         "role": "user",
-                        "content": [{"text": "Please continue by calling one of the provided tools (read_file/write_file/list_files/finish)."}],
+                        "content": [{"text": "Please continue by calling one of the provided tools (read_file/write_file/edit_file/list_files/finish)."}],
                     }
                 )
                 continue
@@ -545,6 +667,7 @@ class BedrockToolUseAgentBackend(AgentBackend):
                 workspace_root=Path(handle.worktree_path),
                 max_turns=self._max_turns_override,
                 fallback_clients=worker_fallbacks,
+                fallback_models=self._fallback_models,
             )
             try:
                 diff = worker_backend.implement_subtask(run_context=run_context, subtask=subtask)
@@ -616,6 +739,8 @@ class BedrockToolUseAgentBackend(AgentBackend):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(tool_input["content"])
                 return {"written": True, "path": tool_input["path"], "bytes": len(tool_input["content"])}
+            if name == _EDIT_FILE_TOOL:
+                return self._execute_edit_file(tool_input)
             if name == _LIST_FILES_TOOL:
                 path = _safe_join(self._workspace_root, tool_input.get("path", "."))
                 if not path.is_dir():
@@ -642,6 +767,54 @@ class BedrockToolUseAgentBackend(AgentBackend):
             if isinstance(exc, KeyError):
                 return {"error": f"{name}: missing required field {exc.args[0]!r} in the tool call input"}
             return {"error": str(exc)}
+
+    def _execute_edit_file(self, tool_input: dict) -> dict:
+        """`edit_file`'s real str_replace-style edit -- same exact-match-
+        required discipline Claude Code's own Edit tool and every major
+        coding-agent scaffold (SWE-agent, OpenHands) converged on as more
+        reliable for LLM-generated edits than line-number or unified-diff
+        formats (a real, deliberate trade-off: a single whitespace
+        mismatch fails the edit rather than silently mangling the file --
+        `_execute_tool`'s caller reports it back to the model as a real
+        tool error, same as every other case there, giving it a real
+        chance to read_file and retry with the exact current text).
+        Every real failure mode is a returned error, never a raised
+        exception out of the loop: file missing (write_file is for new
+        files), old_str not found, old_str not unique without
+        replace_all, and old_str == new_str (almost always a real
+        copy-paste mistake in the model's own call, not a legitimate
+        edit, so rejected rather than silently accepted as a no-op)."""
+        path = _safe_join(self._workspace_root, tool_input["path"])
+        old_str = tool_input["old_str"]
+        new_str = tool_input["new_str"]
+        replace_all = bool(tool_input.get("replace_all", False))
+
+        if not path.is_file():
+            return {"error": f"no such file: {tool_input['path']} -- use write_file to create a new file"}
+        if old_str == new_str:
+            return {"error": "old_str and new_str are identical -- this would be a no-op edit"}
+
+        content = path.read_text(errors="replace")
+        occurrences = content.count(old_str)
+        if occurrences == 0:
+            return {
+                "error": (
+                    "old_str was not found in the file -- it must match the file's exact current "
+                    "content, including whitespace/indentation. Use read_file first if unsure."
+                )
+            }
+        if occurrences > 1 and not replace_all:
+            return {
+                "error": (
+                    f"old_str is not unique in the file ({occurrences} occurrences found) -- "
+                    "include more surrounding context to make it unique, or pass "
+                    "replace_all=true to replace every occurrence."
+                )
+            }
+
+        new_content = content.replace(old_str, new_str, -1 if replace_all else 1)
+        path.write_text(new_content)
+        return {"edited": True, "path": tool_input["path"], "replacements": occurrences if replace_all else 1}
 
     @staticmethod
     def _tool_result(tool_use_id: str | None, payload: dict) -> dict:
@@ -764,7 +937,8 @@ class BedrockToolUseAgentBackend(AgentBackend):
         try:
             return call_converse_with_retry(
                 client=self._client, request_kwargs=request_kwargs, config=self._config,
-                fallback_clients=self._fallback_clients, sticky_state=self._sticky_state,
+                fallback_clients=self._fallback_clients, fallback_models=self._fallback_models,
+                sticky_state=self._sticky_state,
             )
         except (BedrockThrottledError, BedrockAccessDeniedError, BedrockInvocationError, BedrockMalformedOutputError):
             raise

@@ -189,7 +189,15 @@ region's full timeout on every turn — see `bedrock_backend
 .call_converse_with_retry`'s own docstring. Confirm your chosen
 fallback regions actually serve the same model first, e.g. `aws
 bedrock get-foundation-model --model-identifier <id> --region
-<region>`).
+<region>`), and `BEDROCK_FALLBACK_MODELS` (comma-separated real Bedrock
+model ids — **your own deliberate low-cost picks only, never the
+expensive primary model**, ordered best-quality-first among that
+low-cost set — to fall over to once `BEDROCK_MODEL_ID` has exhausted
+every region above; a real live-run finding this closes: a persistently
+degraded *model*, not just a region, still stalled every real call for
+minutes at a time even with region fallback alone. Same sticky-once-
+recovered behavior as region fallback — see `bedrock_backend
+.call_converse_with_retry`'s own docstring).
 
 ## Run it — `jira_poll_run.py` (task pulled from a real Jira story)
 
