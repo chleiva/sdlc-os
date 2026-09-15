@@ -64,37 +64,51 @@ once, up front, but the test run itself only spawns local subprocesses.
 | Flaky detection | Real re-run logic against a real, fixed-schedule flaky fixture (a counter file, not timing-based) | The fixture's determinism mechanism (a counter file) is a test-harness device, not a claim that all real-world flakiness is this predictable |
 | Retry budget | Real bookkeeping (`RetryBudget`, `VerificationPipeline`) | — |
 
-## Plan-artifact schema reconciliation (flag for D2 — READ THIS)
+## Plan-artifact schema reconciliation (flag for D2 — still not done)
 
-**D2 (the orchestrator) is being built concurrently and was not available
-to import from.** Per this deliverable's instructions, `schema/plan-artifact.schema.json`
-and `plan_artifact.py` are **D7's own JSON Schema**, built directly from
-master-spec §9.5's prose (declared scope, acceptance-criteria-to-test
-map, sub-task graph, risk classification/budget) — not a copy of
-anything D2 emits, because nothing D2 emits existed yet.
+**D2 (the orchestrator) has since landed, with its own real, independently-
+built schema — `services/orchestrator/src/orchestrator/schema/plan_artifact.schema.json`
+(D2's `plan_artifact.generate_plan_artifact`) — and the divergence this
+section originally flagged as a future risk is real, confirmed, and
+still unreconciled.** `schema/plan-artifact.schema.json` here in D7 and
+`plan_artifact.py` remain **D7's own JSON Schema**, built directly from
+master-spec §9.5's prose before D2 existed to import from — not
+D2's schema, and not reconciled with it since.
 
-**This must be reconciled against whatever D2 actually produces once it
-lands.** Concretely, a human/D2's own agent should check:
+**Confirmed differences, comparing the two real schemas directly:**
 
-- Field names: this schema uses `declared_scope.in_scope`/`out_of_scope`,
-  `acceptance_criteria` + `acceptance_criteria_verification_map` (two
-  separate arrays, joined by `criterion_id`), `sub_task_graph`, and
-  `risk.tier`/`risk.story_size`/`risk.budget`. D2 may reasonably choose
-  different names/nesting for the same §9.5 content.
-- Whether D2 emits the criteria list and the verification map as one
-  combined structure instead of two joined arrays.
-- Whether D2's `risk.budget` is copied onto the artifact at approval time
-  (as this schema assumes, per §9.5's "pinned at approval time") or
-  computed on read.
-- Whether D2 versions/pins `plan_document_ref` the same way this schema
-  does.
+- Naming: D2 uses `subtask_graph.subtasks` (not `sub_task_graph`) and
+  `declared_scope.in_scope`/`out_of_scope` (same shape as this schema's
+  `declared_scope`, different top-level key nesting in places).
+- **D2 combines the criteria list and verification map into one array**
+  — `acceptance_criteria_map`, each entry carrying `criterion_id`/
+  `description`/`verification_tests` together — rather than this
+  schema's two separate, `criterion_id`-joined arrays
+  (`acceptance_criteria` + `acceptance_criteria_verification_map`).
+  This answers the open question the original version of this section
+  posed: D2 chose the combined shape.
+- D2 ties a plan artifact to its human-readable source via
+  `source_plan_hash` (a content hash), not a `plan_document_ref`
+  pointer — a different mechanism achieving the same §9.5 intent.
+- D2's `risk.budget` is baked into the artifact at generation time from
+  a resolved `checkpoints.Budget` (matching this schema's own
+  "pinned at approval time" assumption), with `risk.story_size`/
+  `risk.cross_cutting_or_high_risk`/`risk.tier` alongside it.
 
-Until reconciled, D7's layers 2 and (indirectly) the retry/budget logic
-consume `plan_artifact.py`'s schema. Swapping to D2's real schema should
-only require changing `plan_artifact.py`'s field lookups (`criterion_id`,
-`test_ids`, etc.) — the layer functions themselves (`acceptance_mapping.py`)
-take a plain `dict` and would need the same kind of small adapter either
-way.
+**Reconciliation still has not happened.** `real_verification_runner
+.RealVerificationRunner` (D2's own integration of D7, in
+`services/orchestrator`) sidesteps the question entirely rather than
+resolving it: it scopes its two real layers off `RunProgress
+.files_touched` — the actual files a real `git diff` shows changed —
+never off either schema's own `declared_scope`. So the two schemas can
+keep silently diverging further with no consumer ever forced to notice.
+D7's own layers 2 and (indirectly) the retry/budget logic still consume
+`plan_artifact.py`'s schema here, unchanged. Swapping to D2's real
+schema should only require changing `plan_artifact.py`'s field lookups
+(`criterion_id`, `test_ids`, etc.) — the layer functions themselves
+(`acceptance_mapping.py`) take a plain `dict` and would need the same
+kind of small adapter either way. This is a genuine, still-open gap
+worth a human decision, not merely a documentation nit.
 
 ## Other spec ambiguities / interpretive decisions a human should confirm
 

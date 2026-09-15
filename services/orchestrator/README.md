@@ -15,7 +15,14 @@ services/orchestrator/
   src/orchestrator/
     core.py             the Orchestrator class: the nine-stage state
                          machine, gates, Section 9.3 checkpoint
-                         pause/resume via structured elicitation
+                         pause/resume via structured elicitation. A
+                         repeatedly-failing implement_subtask/
+                         implement_subtasks_parallel call -- not just a
+                         verification failure -- now counts toward the
+                         same "stuck" checkpoint via
+                         _handle_implementation_failure, pausing with a
+                         real, human-visible checkpoint once the retry
+                         budget is exhausted instead of raising uncaught
     model_backend.py     AgentBackend interface (real-model integration
                          seam) + ScriptedAgentBackend (deterministic mock)
     ollama_backend.py     OllamaAgentBackend: real AgentBackend client for
@@ -29,7 +36,26 @@ services/orchestrator/
                          for OpenAI's Chat Completions API (Section 13.8)
     bedrock_backend.py     (New, Rev 9) BedrockAgentBackend: real client
                          for Amazon Bedrock's Converse API, hosting
-                         MiniMax M2.5 among other models (Section 13.8)
+                         MiniMax M2.5 among other models (Section 13.8);
+                         structured-output only (the model *describes* a
+                         diff -- see tool_use_bedrock_backend.py below
+                         for the one that actually writes files). Also
+                         owns call_converse_with_retry: real retry-with-
+                         backoff plus real region AND model fallover
+                         (fallback_clients/fallback_models -- see
+                         "Selecting an inference vendor" below) and
+                         real per-call timing logging.
+    tool_use_bedrock_backend.py  (New) BedrockToolUseAgentBackend: the
+                         real, multi-turn tool-calling implementation
+                         loop against Bedrock's Converse API --
+                         read_file/write_file/edit_file/list_files/
+                         finish tools operating on a real git worktree;
+                         DiffOutput is computed from a real `git diff`,
+                         never the model's own self-report. This is the
+                         class deploy/run-worker/_run_lib.py actually
+                         constructs and runs for every real live run --
+                         not yet reachable through create_agent_backend
+                         (see "Selecting an inference vendor" below).
     backend_factory.py      (New, Rev 9) create_agent_backend(vendor, ...):
                          the config-driven seam that selects among all
                          five AgentBackend implementations above (see
@@ -42,8 +68,16 @@ services/orchestrator/
                          tiering" below)
     verification.py      VerificationRunner interface (D7 integration
                          seam) + ScriptedVerificationRunner (mock)
+    real_verification_runner.py  RealVerificationRunner: wires D7's real
+                         verification_pipeline package in for two of
+                         Section 11.1's seven layers (see its own module
+                         docstring for exactly which, and what's still
+                         "skipped -- not implemented in this pass")
     checkpoints.py        Section 9.4 default budgets + Section 9.3
-                         checkpoint-trigger computation
+                         checkpoint-trigger computation, including
+                         size_budget_prompt_text() -- the model-facing
+                         rendering of the real DEFAULT_BUDGETS numbers
+                         every vendor backend's plan prompt splices in
     plan_artifact.py       Section 9.5 structured plan artifact: JSON
                          Schema + generator + durable per-run store
     schema/plan_artifact.schema.json   the versioned plan-artifact schema
@@ -174,6 +208,62 @@ raises `ValueError` naming every supported vendor;
 `ValueError` explaining exactly why that one field has no default,
 rather than a confusing `TypeError` from inside the dataclass
 constructor.
+
+**`create_agent_backend("bedrock", ...)` gives you the structured-output
+backend, not the file-writing one.** Every vendor above (including
+Bedrock through this factory) implements `implement_subtask` as a single
+structured-output call: the model *describes* a diff
+(`files_touched`/`lines_changed`/`commit_message`), and nothing here
+writes real file content to a real repository. The one real, multi-turn,
+tool-using implementation loop that actually does — `BedrockToolUseAgentBackend`
+in `tool_use_bedrock_backend.py` — is not yet wired into this factory;
+construct it directly (see `deploy/run-worker/_run_lib.py` for the
+reference wiring, and "The real implementation loop" below).
+
+## The real implementation loop, region/model fallover, and turn pacing
+
+`BedrockToolUseAgentBackend` (`tool_use_bedrock_backend.py`) is the class
+that actually implements a subtask against a real git worktree — five
+real tools: `read_file`/`list_files` to explore, `write_file` for a new
+file or a genuine full rewrite, `edit_file` (str_replace-style —
+preferred for any change to a file that already exists, so a small fix
+doesn't regenerate the whole file) for a targeted change, and `finish`
+to end the turn loop with a real commit message. `author_plan`/`re_plan`
+delegate to a plain `BedrockAgentBackend` (planning has no reason to
+need file I/O).
+
+**Region and model fallover.** `bedrock_backend.call_converse_with_retry`
+retries each call with real exponential backoff, then fails over —
+model-major, region-minor: every configured region is tried for the
+current model before downgrading to the next one — across
+`fallback_clients` (additional `(client, region_name)` pairs) and
+`fallback_models` (additional model ids, operator-ordered, meant to be
+low-cost picks tried only once the preferred model has exhausted every
+region). A fallback that succeeds once becomes that instance's sticky
+preference for every later call. See that function's own docstring for
+the full mechanics, and `deploy/run-worker/README.md`'s
+`BEDROCK_FALLBACK_REGIONS`/`BEDROCK_FALLBACK_MODELS` for the operator-
+facing env vars that configure this in a real live run.
+
+**Turn pacing, and every real call's own timing.** Each subtask is
+told a real, size-derived soft turn target (`_soft_turn_target_for_story_size`)
+it should aim to finish within — a pacing hint communicated in its own
+system-prompt text, not silently enforced — while the loop's actual
+hard stop (`_hard_turn_cap_for_story_size`) is a deliberately looser
+multiple of that target (`_HARD_CAP_MULTIPLIER`), a circuit breaker
+against a genuinely runaway/stuck loop rather than a number the model
+is expected to plan against. Every real Bedrock call also logs its own
+duration (success or retry) via `bedrock_backend`'s `logger`, so a slow
+run is diagnosable from its logs instead of a black box.
+
+**A subtask this agent structurally cannot complete** raises
+`BedrockAgenticLoopExhaustedError` once it exhausts its hard turn cap
+without calling `finish`. `core.py`'s `_handle_implementation_failure`
+catches that (and any other implementation-stage exception) and counts
+it toward the same Section 9.3 "stuck" checkpoint a repeated
+verification failure already uses — pausing with a real, human-visible
+checkpoint once the retry budget is exhausted, rather than retrying
+silently forever or crashing the whole run.
 
 **Credential handling, all four vendors**: every API key/credential is a
 plain constructor argument, never read from an environment variable

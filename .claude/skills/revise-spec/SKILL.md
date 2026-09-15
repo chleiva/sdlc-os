@@ -6,7 +6,7 @@ description: Add a new numbered revision to the AI Coding Agentic Solution speci
 # Revising the master spec
 
 The master spec has an established revision convention (currently at
-Revision 8). Follow it exactly — five separate places need to move
+Revision 9). Follow it exactly — five separate places need to move
 together, and the callout box has a hard formatting constraint that
 silently breaks if skipped.
 

@@ -43,12 +43,17 @@
 #    standalone containers here is for image-build completeness and
 #    manual inspection only; nothing on this compose network actually
 #    talks stdio-MCP to them across a container boundary today.
-# 4. job-dispatcher's capacity provider is still `MockCapacityProvider`,
-#    hardcoded in its own `__main__.py` -- there is no existing
-#    config-driven way to select D1's new `LocalCapacityProvider`
-#    (`local_capacity.py`) at process startup, and D14 is not permitted
-#    to add one without editing job-dispatcher's own source. This is a
-#    real, current gap, not something this compose file works around.
+# 4. job-dispatcher's capacity provider selection is real and
+#    config-driven: `__main__.py`'s own `--capacity-provider` flag
+#    (New, Rev 9) picks `LocalCapacityProvider` when this compose
+#    file's `deploy/job-dispatcher/entrypoint.sh` passes
+#    `--capacity-provider "${JOB_DISPATCHER_CAPACITY_PROVIDER:-local}"`
+#    -- `local` by default here, since this deployment mode has no real
+#    GPU/Karpenter cluster to request capacity from (inference is
+#    delegated to an external API-key vendor instead, §13.8). That
+#    entrypoint script is packaging-only (outside `services/job-
+#    dispatcher/`, per D14's scope) -- it execs job-dispatcher's own
+#    real, unmodified `python -m job_dispatcher`, never a copy or a fork.
 #
 # See the top-level README's "Docker Compose deployment" section for
 # the human setup steps (§17.4 secrets, TLS, etc.) this file assumes.

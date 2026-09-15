@@ -17,12 +17,18 @@ production (see "Quick start" and "Multi-tenant cloud deployment" below).
 ## Status
 
 Active development. Every component below is real, independently-tested
-code — not a mockup — but the system has not yet been run end-to-end
-against a live cloud account, a real model endpoint, or a real Jira/
-GitHub organization. Each service's own README says exactly what's real
-versus backed by a local mock at its external boundary, and `CLAUDE.md`
-has a full list of what's still open before a real deployment,
-including two gaps the Quick start section below states plainly.
+code — not a mockup. The Docker Compose deployment mode below has not
+been run end-to-end against a live cloud account, a real model endpoint,
+or a real Jira/GitHub organization yet — but `deploy/run-worker/` (a
+pair of manually-invoked tools, outside Compose; see its own README)
+already has: a real GitHub App clone, a real multi-turn Bedrock
+implementation loop, real verification, a real gate, and a real PR,
+plus (for its Jira-polling variant) real async human-in-the-loop via a
+real Jira Cloud site. Each service's own README says exactly what's
+real versus backed by a local mock at its external boundary, and
+`CLAUDE.md` has a full list of what's still open before a real
+deployment, including two gaps the Quick start section below states
+plainly.
 
 ## Quick start: Docker Compose
 
@@ -59,12 +65,16 @@ end-to-end agent run:**
   deployment selects by default (`JOB_DISPATCHER_CAPACITY_PROVIDER=local`)
   since there's no GPU to provision when inference is delegated to an
   external vendor.
-- **`orchestrator` has no real process entrypoint yet.** It's a library
-  driven by tests so far — nothing in this codebase calls it at
-  runtime. Its container builds the image (including the new Rev 9
+- **`orchestrator` has no real process entrypoint inside this Compose
+  stack.** Its container builds the image (including the new Rev 9
   vendor `AgentBackend`s and the Docker-container sandbox tier) and
   runs its own test suite as a self-check, then exits; a real service
-  that `job-dispatcher` actually dispatches work to is still open.
+  `job-dispatcher` actually dispatches work to, inside Compose, is
+  still open. Outside Compose, `deploy/run-worker/` already runs the
+  real orchestrator end-to-end (see its own README for exactly what —
+  real clone, real plan/implement, real verification, real gate, real
+  PR) — as a pair of manually-invoked scripts, not a service this
+  stack wires up.
 - **The Run Registry has no network-reachable server.** Every consumer
   (`job-dispatcher`, `fleet-dashboard`, `orchestrator`, `gates`) uses it
   as an embedded library against one SQLite file. This compose stack
@@ -98,6 +108,7 @@ including these two.
 | `services/index-server` | Repository index: symbols, exhaustive references, call graph, semantic search |
 | `services/issue-tracker` | Jira integration |
 | `services/source-control` | GitHub App integration |
+| `services/kms-boundary` | Per-tenant KMS envelope encryption (§17.3, Rev 9) — closes a real gap D10's security audit found; consumed by `source-control` and `issue-tracker` |
 | `services/verification-pipeline` | The automated gate a change must pass before it's eligible for human review |
 | `services/gates` | Human-in-the-loop: autonomy levels, approvals, escalation |
 | `services/fleet-dashboard` | Read-only Kanban view over the Run Registry |

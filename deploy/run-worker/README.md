@@ -20,8 +20,12 @@ Both share the exact same real orchestrator wiring, factored into
 2. Real Bedrock/MiniMax M2.5 planning, and a real multi-turn tool-using
    implementation loop (`orchestrator.tool_use_bedrock_backend
    .BedrockToolUseAgentBackend`) that actually writes files into that
-   worktree — computed `DiffOutput` comes from a real `git diff`, never
-   the model's own self-report.
+   worktree, with five real tools: `read_file`/`list_files` to explore,
+   `write_file` for a new file or a genuine full rewrite, `edit_file`
+   (str_replace-style — preferred for any change to a file that already
+   exists, so a small fix doesn't regenerate the whole file) for a
+   targeted change, and `finish` to end the loop. Computed `DiffOutput`
+   comes from a real `git diff`, never the model's own self-report.
 3. Real verification (`orchestrator.real_verification_runner
    .RealVerificationRunner`): real `pytest` + real `ruff`/`mypy` against
    the real worktree. Five of Section 11.1's seven layers are honestly
@@ -39,7 +43,17 @@ Both share the exact same real orchestrator wiring, factored into
 ## Async human-in-the-loop (`jira_poll_run.py` only)
 
 An automatically-triggered run cannot block on a terminal prompt --
-nobody is watching one. So every gate/checkpoint pause instead:
+nobody is watching one. So every gate/checkpoint pause instead — this
+now includes a subtask that keeps failing identically (not just a
+verification failure): `core.py`'s `_handle_implementation_failure`
+counts a repeatedly-failing `implement_subtask` call toward the same
+Section 9.3 "stuck" checkpoint a repeated verification failure already
+uses, so it surfaces here, as a real checkpoint, once the retry budget
+is exhausted -- rather than only ever being caught by `jira_poll_run
+.py`'s own generic "a real transient infrastructure failure must never
+crash this whole process" handler around `resume_paused_run_async`
+(which still applies below that budget, and to genuinely transient
+failures like a real GitHub outage):
 
 1. Posts a real Jira comment describing exactly what's needed (the
    plan summary, or the checkpoint reason) and the exact word to reply

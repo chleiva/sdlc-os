@@ -118,7 +118,7 @@ After any change to a shared/consumed file, re-run that service's OWN
 test suite too:
 
 ```bash
-cd services/orchestrator  && .venv/bin/python -m pytest tests/ -q   # 60 passed, 1 skipped (unchanged)
-cd services/tenant-cell   && .venv/bin/python -m pytest -q          # 25 passed (unchanged)
-cd services/job-dispatcher && .venv/bin/python -m pytest -q         # 21 passed (unchanged)
+cd services/orchestrator  && .venv/bin/python -m pytest tests/ -q   # should all pass (185 passed, 1 skipped as of this writing -- orchestrator's own suite grows often, don't treat this exact count as a contract)
+cd services/tenant-cell   && .venv/bin/python -m pytest -q          # should all pass (25 passed as of this writing)
+cd services/job-dispatcher && .venv/bin/python -m pytest -q         # should all pass (30 passed as of this writing)
 ```

@@ -63,6 +63,14 @@ brief (`docs/deliverables/wave2-D10-security-hardening.md`):
 
 - `test_d1_webhook_forgery.py`
 - `test_d2_hook_chain_and_secrets.py`
+- `test_d2_rev9_docker_sandbox.py` (New, Rev 9 — adversarial escape
+  attempts against the Docker Compose deployment mode's
+  `SandboxTier.DOCKER_CONTAINER` sandbox, real container runs skipped
+  where no local Docker daemon is reachable)
+- `test_d2_rev9_vendor_backends.py` (New, Rev 9 — the Anthropic/OpenAI/
+  Bedrock API-key vendor `AgentBackend` implementations, §13.8:
+  malicious/malformed vendor responses treated as inert data, never a
+  new instruction, plus credential-handling checks)
 - `test_d3_index_tenant_isolation.py`
 - `test_d5_source_control_hardening.py`
 - `test_d6_kms_and_node_isolation.py`

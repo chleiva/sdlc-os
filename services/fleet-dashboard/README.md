@@ -18,6 +18,8 @@ structural/fitness test proving the former).
 services/fleet-dashboard/
   src/fleet_dashboard/
     columns.py            stage -> board-column mapping (brief's table)
+    config.py              small fixed constants shared across the
+                            dashboard (POLL_INTERVAL_SECONDS, DEFAULT_PORT)
     budgets.py             Sec 9.4 reference budget (see "Known gaps" below)
     poll_state.py          ephemeral, in-process poll history (checkpoint
                             counts, verification-bounce-back detection)
