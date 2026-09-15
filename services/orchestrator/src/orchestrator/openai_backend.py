@@ -76,6 +76,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
+from orchestrator.checkpoints import size_budget_prompt_text
 from orchestrator.model_backend import AgentBackend, DiffOutput, PlanOutput, SubTask
 from orchestrator.ollama_backend import (
     DIFF_OUTPUT_SCHEMA,
@@ -90,6 +91,13 @@ from orchestrator.ollama_backend import (
 DEFAULT_MODEL = "gpt-4.1"
 DEFAULT_BASE_URL = "https://api.openai.com"
 _CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+
+# See checkpoints.size_budget_prompt_text's own comment (and
+# ollama_backend.py/bedrock_backend.py's identical constant) for the real
+# live-run bug this closes -- generated from the same DEFAULT_BUDGETS
+# check_size enforces, spliced into every vendor's plan prompt in
+# lockstep, never hand-copied.
+_SIZE_BUDGET_GUIDANCE = size_budget_prompt_text()
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +233,7 @@ _PLAN_SYSTEM_PROMPT = (
     "scope_in and scope_out must be real, literal file paths (e.g. "
     "'tetris.html', 'src/app.py') -- never prose feature descriptions -- "
     "since the file(s) this plan's own deliverable requires must always "
-    "be listed as real paths in scope_in."
+    "be listed as real paths in scope_in.\n\n" + _SIZE_BUDGET_GUIDANCE
 )
 
 _IMPLEMENT_SYSTEM_PROMPT = (

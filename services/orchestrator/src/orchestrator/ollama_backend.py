@@ -50,6 +50,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from orchestrator.checkpoints import size_budget_prompt_text
 from orchestrator.model_backend import (
     AcceptanceCriterion,
     AgentBackend,
@@ -57,6 +58,13 @@ from orchestrator.model_backend import (
     PlanOutput,
     SubTask,
 )
+
+# See checkpoints.size_budget_prompt_text's own docstring/comment for the
+# real live-run bug this closes: every vendor backend's plan prompt below
+# splices this in verbatim, generated from the same DEFAULT_BUDGETS
+# `checkpoints.check_size` actually enforces, so a plan is authored with
+# real knowledge of what its own story_size choice will be held to.
+_SIZE_BUDGET_GUIDANCE = size_budget_prompt_text()
 
 DEFAULT_MODEL = "ornith-1.5-35b-a3b"
 
@@ -214,7 +222,17 @@ PLAN_OUTPUT_SCHEMA = {
             ),
         },
         "subtasks": {"type": "array", "items": _SUBTASK_SCHEMA},
-        "story_size": {"type": "string", "enum": ["S", "M", "L", "XL"]},
+        "story_size": {
+            "type": "string",
+            "enum": ["S", "M", "L", "XL"],
+            "description": (
+                "Pick the smallest size that honestly fits this story's whole real scope, across "
+                "every subtask combined -- each size has a hard diff-size ceiling enforced after "
+                "implementation (see the system prompt for the exact numbers); picking a size "
+                "smaller than the work really needs does not make it fit, it only means the "
+                "checkpoint fires later, after time is already spent."
+            ),
+        },
         "cross_cutting_or_high_risk": {"type": "boolean"},
         "risk_tier": {"type": "string", "enum": ["low", "medium", "high"]},
         "rollback_strategy": {"type": "string"},
@@ -258,7 +276,7 @@ _PLAN_SYSTEM_PROMPT = (
     "scope_in and scope_out must be real, literal file paths (e.g. "
     "'tetris.html', 'src/app.py') -- never prose feature descriptions -- "
     "since the file(s) this plan's own deliverable requires must always "
-    "be listed as real paths in scope_in."
+    "be listed as real paths in scope_in.\n\n" + _SIZE_BUDGET_GUIDANCE
 )
 
 _IMPLEMENT_SYSTEM_PROMPT = (

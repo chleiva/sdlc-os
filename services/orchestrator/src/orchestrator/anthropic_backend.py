@@ -65,6 +65,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from orchestrator.checkpoints import size_budget_prompt_text
 from orchestrator.model_backend import (
     AcceptanceCriterion,
     AgentBackend,
@@ -73,6 +74,13 @@ from orchestrator.model_backend import (
     SubTask,
 )
 from orchestrator.ollama_backend import DIFF_OUTPUT_SCHEMA, PLAN_OUTPUT_SCHEMA
+
+# See checkpoints.size_budget_prompt_text's own comment (and every other
+# vendor backend's identical constant) for the real live-run bug this
+# closes -- generated from the same DEFAULT_BUDGETS check_size enforces,
+# spliced into every vendor's plan prompt/tool-description in lockstep,
+# never hand-copied.
+_SIZE_BUDGET_GUIDANCE = size_budget_prompt_text()
 
 # A real, current Claude model id (see the model-selection reference this
 # module was built against: `claude-sonnet-5`, Anthropic's current
@@ -110,8 +118,9 @@ _SCOPE_CONSTRAINT = (
     "since the file(s) this plan's own deliverable requires must always "
     "be listed as real paths in scope_in."
 )
-_PLAN_TOOL_DESCRIPTION = f"Emit the structured plan for this run. {_SUBTASK_CONSTRAINT} {_SCOPE_CONSTRAINT}"
-_RE_PLAN_TOOL_DESCRIPTION = f"Emit the structured, revised plan for this run. {_SUBTASK_CONSTRAINT} {_SCOPE_CONSTRAINT}"
+_SIZE_CONSTRAINT = _SIZE_BUDGET_GUIDANCE
+_PLAN_TOOL_DESCRIPTION = f"Emit the structured plan for this run. {_SUBTASK_CONSTRAINT} {_SCOPE_CONSTRAINT}\n\n{_SIZE_CONSTRAINT}"
+_RE_PLAN_TOOL_DESCRIPTION = f"Emit the structured, revised plan for this run. {_SUBTASK_CONSTRAINT} {_SCOPE_CONSTRAINT}\n\n{_SIZE_CONSTRAINT}"
 
 
 # ---------------------------------------------------------------------------

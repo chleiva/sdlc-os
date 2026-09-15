@@ -128,7 +128,14 @@ from orchestrator.model_backend import (
     PlanOutput,
     SubTask,
 )
+from orchestrator.checkpoints import size_budget_prompt_text
 from orchestrator.ollama_backend import DIFF_OUTPUT_SCHEMA, PLAN_OUTPUT_SCHEMA
+
+# See checkpoints.size_budget_prompt_text's own comment (and
+# ollama_backend.py's identical constant) for the real live-run bug this
+# closes -- generated from the same DEFAULT_BUDGETS check_size enforces,
+# spliced into every vendor's plan prompt in lockstep, never hand-copied.
+_SIZE_BUDGET_GUIDANCE = size_budget_prompt_text()
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +163,7 @@ _PLAN_SYSTEM_PROMPT = (
     "must be real, literal file paths (e.g. 'tetris.html', "
     "'src/app.py') -- never prose feature descriptions -- since the "
     "file(s) this plan's own deliverable requires must always be listed "
-    "as real paths in scope_in."
+    "as real paths in scope_in.\n\n" + _SIZE_BUDGET_GUIDANCE
 )
 _IMPLEMENT_SYSTEM_PROMPT = (
     "You are the implementation stage of an autonomous coding agent, "

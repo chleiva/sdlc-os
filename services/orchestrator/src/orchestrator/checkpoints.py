@@ -62,6 +62,61 @@ TIME_COST_WARNING_FRACTION = 0.8
 SINGLE_FILE_LINE_MULTIPLIER = 3
 
 
+# Real live-run bug this closes: a run's plan authored a story sized "L"
+# whose actual implementation produced a 2083-line diff across 2 files --
+# nearly 2.6x the "L" budget below -- and only found out from a Section
+# 9.3 size checkpoint pausing the run *after* implementation had already
+# spent the whole diff. Investigated afterward: no `AgentBackend`
+# anywhere in this package ever told the model what a story-size choice
+# actually costs -- `story_size`/`cross_cutting_or_high_risk` were free
+# text/boolean fields the model filled in with zero visibility into the
+# budget its own answer would be held to, so it had no way to plan
+# proportionately or ask for decomposition instead. This function is the
+# single, generated-from-`DEFAULT_BUDGETS` rendering of that budget every
+# vendor backend's plan prompt/tool-description splices in (see
+# `tool_use_bedrock_backend.py`'s module docstring for why a plan-
+# authoring fix always lands in `bedrock_backend`, `anthropic_backend`,
+# `openai_backend`, and `ollama_backend` at once, in lockstep, the same
+# discipline already used for the "no test-running subtask" and
+# "scope_in must be real paths" fixes) -- generated, not hand-copied
+# into four files, so it can never silently drift from the numbers
+# `check_size` actually enforces.
+def size_budget_prompt_text() -> str:
+    lines = [
+        "Each story size has a hard diff-size ceiling, checked once implementation finishes "
+        "each subtask -- exceeding it pauses the whole run at a size checkpoint until a human "
+        "says continue or stop, wasting everything already implemented in the meantime:"
+    ]
+    for size in STORY_SIZES:
+        budget = DEFAULT_BUDGETS.get(size)
+        if budget is None:
+            lines.append(
+                f"- {size}: not a runnable budget at all -- the System never runs an {size} story "
+                "directly. If the work is genuinely this large, say so in open_questions and keep "
+                "this plan's own story_size at the largest size that actually fits its real scope; "
+                "do not pick a smaller size than the work honestly needs just to avoid this."
+            )
+            continue
+        single_file_lines = budget.size_checkpoint_lines * SINGLE_FILE_LINE_MULTIPLIER
+        lines.append(
+            f"- {size}: at most {budget.size_checkpoint_lines} total changed lines across at most "
+            f"{budget.size_checkpoint_files} files (a diff touching only one file gets a wider "
+            f"allowance, up to {single_file_lines} lines, since one file to review is materially "
+            "lower-risk than the same total size spread across many)."
+        )
+    lines.append(
+        "Pick the smallest size that HONESTLY fits the whole story's real scope, across every "
+        "subtask combined -- not the size that merely sounds reasonable. Set "
+        "cross_cutting_or_high_risk=true only when the change genuinely is cross-cutting or "
+        "high-risk (it bumps the resolved budget one size class automatically); never set it "
+        "just to buy a bigger budget for an otherwise-ordinary story. If the real scope will not "
+        "fit even inside L's ceiling above, do not silently under-declare story_size to dodge a "
+        "checkpoint -- say so plainly in open_questions so a human can split the story into "
+        "several smaller ones instead, since a story that size is not meant to run as one plan."
+    )
+    return "\n".join(lines)
+
+
 class XLNotRunnableError(Exception):
     """Raised when budget resolution would require an XL budget -- Section
     9.4 treats XL as a decomposition signal, never an executable budget."""

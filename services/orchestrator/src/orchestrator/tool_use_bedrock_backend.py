@@ -66,6 +66,18 @@ and every vendor backend's plan system prompt (`ollama_backend
 code-authoring action, never a "run/verify tests" step, since
 verification already happens automatically, for real, in the separate
 stage `core.py` runs next.
+
+**A second real live-run bug, same shape, fixed the same lockstep way**:
+a plan honestly sized "L" still produced a 2083-line diff across 2 files
+against L's 800-line budget, because no `AgentBackend` anywhere told the
+model what its own `story_size` choice actually costs -- see
+`checkpoints.size_budget_prompt_text` (spliced into every vendor's plan
+prompt/tool-description, same four files as above) for the planning-side
+fix, and `_SIZE_WARNING_FRACTION`/`implement_subtask` below for this
+class's own implementation-side half: a real, running `git diff` check
+that nudges the model mid-loop as it approaches this story's budget,
+instead of only finding out from the Section 9.3 checkpoint after the
+whole diff is already written.
 """
 
 from __future__ import annotations
@@ -87,7 +99,7 @@ from orchestrator.bedrock_backend import (
     BedrockThrottledError,
     call_converse_with_retry,
 )
-from orchestrator.checkpoints import DEFAULT_BUDGETS
+from orchestrator.checkpoints import DEFAULT_BUDGETS, SINGLE_FILE_LINE_MULTIPLIER
 from orchestrator.model_backend import AgentBackend, DiffOutput, PlanOutput, SubTask
 from orchestrator.worktree import (
     WorktreeHandle,
@@ -252,6 +264,36 @@ def _max_turns_for_story_size(story_size: str | None) -> int:
     return max(1, int(subtask_seconds // _ASSUMED_SECONDS_PER_TURN))
 
 
+#: Real live-run bug this closes, the implementation-stage half of the
+#: same fix `checkpoints.size_budget_prompt_text` makes on the planning
+#: side: a story plan can honestly pick "L" and still overshoot its
+#: budget (a real run's diff reached 2083 lines across 2 files against
+#: an 800-line ceiling) because nothing mid-implementation ever told the
+#: model how much of that budget its own subtask had already spent --
+#: the real Section 9.3 size checkpoint only fires *after* the whole
+#: diff is already written. This is the fraction of the resolved line
+#: budget at which the loop starts nudging the model to wrap up.
+#: Deliberately lower than `checkpoints.TIME_COST_WARNING_FRACTION`'s
+#: 0.8: a single write_file call can add hundreds of lines in one turn,
+#: so this leaves more real room to react before the hard ceiling than a
+#: slower-moving time/cost budget needs.
+_SIZE_WARNING_FRACTION = 0.7
+
+
+def _effective_line_budget(story_size: str | None, *, single_file: bool) -> int | None:
+    """Same effective-threshold arithmetic as `checkpoints.check_size`
+    (single-file multiplier included), so the running nudge below warns
+    against the exact number the real size checkpoint will enforce --
+    never a separately-guessed threshold that could drift from it.
+    Returns None when `story_size` is missing/unrecognized or resolves
+    to XL (`DEFAULT_BUDGETS["XL"]` is None) -- there is nothing sized to
+    warn against in that case."""
+    budget = DEFAULT_BUDGETS.get(story_size or "") if story_size else None
+    if budget is None:
+        return None
+    return budget.size_checkpoint_lines * (SINGLE_FILE_LINE_MULTIPLIER if single_file else 1)
+
+
 class BedrockToolUseAgentBackend(AgentBackend):
     """Real `AgentBackend` for Bedrock/MiniMax M2.5 with a genuine
     multi-turn, tool-using implementation stage. See module docstring."""
@@ -312,6 +354,30 @@ class BedrockToolUseAgentBackend(AgentBackend):
         return self._plan_backend.re_plan(run_context=run_context, feedback=feedback)
 
     def implement_subtask(self, *, run_context: dict, subtask: SubTask) -> DiffOutput:
+        story_size = run_context.get("story_size")
+        # Real live-run bug this closes: see `_SIZE_WARNING_FRACTION`'s own
+        # comment -- a plan that honestly picked "L" could still overshoot
+        # its 800-line budget because nothing here ever told the model
+        # what that budget actually was. Told once, up front, so it can
+        # size this subtask's own work proportionately from the start
+        # (a story budget is shared across every subtask in the plan, not
+        # granted fresh to each one).
+        system_text = _SYSTEM_PROMPT
+        if story_size:
+            budget = DEFAULT_BUDGETS.get(story_size)
+            if budget is not None:
+                system_text = system_text + (
+                    f"\n\nThis story is sized {story_size!r}: its WHOLE diff, across every subtask "
+                    f"combined, must stay at or under {budget.size_checkpoint_lines} changed lines "
+                    f"across at most {budget.size_checkpoint_files} files (more headroom, up to "
+                    f"{budget.size_checkpoint_lines * SINGLE_FILE_LINE_MULTIPLIER} lines, if this "
+                    "subtask's changes land in a single file). That budget is shared with every "
+                    "other subtask in this plan, not reset for each one -- keep this subtask's own "
+                    "footprint no larger than its fair share, and call finish as soon as it is "
+                    "genuinely done rather than continuing to add content beyond what the subtask "
+                    "actually requires."
+                )
+
         user_prompt = (
             "Implement the following subtask for real, using the tools "
             "provided.\n\n"
@@ -321,11 +387,11 @@ class BedrockToolUseAgentBackend(AgentBackend):
         )
         messages: list[dict] = [{"role": "user", "content": [{"text": user_prompt}]}]
 
-        max_turns = self._max_turns_override or _max_turns_for_story_size(run_context.get("story_size"))
+        max_turns = self._max_turns_override or _max_turns_for_story_size(story_size)
 
         commit_message = ""
         for _turn in range(max_turns):
-            response = self._converse_with_tools(messages)
+            response = self._converse_with_tools(messages, system_text=system_text)
             output_message = response["output"]["message"]
             messages.append(output_message)
 
@@ -358,6 +424,31 @@ class BedrockToolUseAgentBackend(AgentBackend):
 
             if finished:
                 break
+
+            # Real live-run bug this closes (see `_SIZE_WARNING_FRACTION`):
+            # a running, real `git diff` check -- not a model self-report
+            # -- so the model finds out it is approaching this subtask's
+            # share of the story budget *while it can still stop*, instead
+            # of only after the real Section 9.3 size checkpoint pauses
+            # the whole run post-hoc. Cheap (local subprocesses only) and
+            # bounded by the same `max_turns` cap every other turn already
+            # pays for.
+            running_touched, running_lines = self._real_git_diff_stats()
+            threshold = _effective_line_budget(story_size, single_file=len(running_touched) <= 1)
+            if threshold is not None:
+                if running_lines >= threshold * _SIZE_WARNING_FRACTION:
+                    tool_result_blocks.append(
+                        {
+                            "text": (
+                                f"[size budget] This subtask's diff so far is {running_lines} lines across "
+                                f"{len(running_touched)} file(s), approaching or over the "
+                                f"{threshold}-line ceiling this story's size class allows for its "
+                                "WHOLE diff (shared across every subtask, not just this one). Wrap "
+                                "this subtask up with the minimum remaining changes and call finish "
+                                "-- do not keep expanding it."
+                            )
+                        }
+                    )
 
             messages.append({"role": "user", "content": tool_result_blocks})
         else:
@@ -648,7 +739,7 @@ class BedrockToolUseAgentBackend(AgentBackend):
 
     # -- Converse plumbing (auto tool choice, multiple real tools) ---------
 
-    def _converse_with_tools(self, messages: list[dict]) -> dict:
+    def _converse_with_tools(self, messages: list[dict], *, system_text: str | None = None) -> dict:
         """Real live-run bug this closes: this call used to hit the real
         `boto3` client directly with no retry at all -- a single
         transient `ReadTimeoutError` (a real `BotoCoreError` subclass,
@@ -657,10 +748,15 @@ class BedrockToolUseAgentBackend(AgentBackend):
         with-backoff logic `BedrockAgentBackend._converse` (the planning
         call) already had and was already tested -- shared here so both
         real Converse call sites are equally resilient to the same real
-        failure modes, not just one of them."""
+        failure modes, not just one of them.
+
+        `system_text` defaults to the module-level `_SYSTEM_PROMPT` --
+        `implement_subtask` passes a per-call variant with this story's
+        own resolved size budget spliced in (see `_SIZE_WARNING_FRACTION`'s
+        comment) so every turn's system message actually reflects it."""
         request_kwargs = {
             "modelId": self._config.model_id,
-            "system": [{"text": _SYSTEM_PROMPT}],
+            "system": [{"text": system_text if system_text is not None else _SYSTEM_PROMPT}],
             "messages": messages,
             "inferenceConfig": {"maxTokens": self._config.max_tokens, "temperature": self._config.temperature},
             "toolConfig": {"tools": _TOOL_SPECS, "toolChoice": {"auto": {}}},
