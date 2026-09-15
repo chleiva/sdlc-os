@@ -1,9 +1,50 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # SDLC Auto — Repo Guide
 
 This repo implements SDLC Auto, an open-source, self-hosted, multi-tenant
 AI coding-agent platform ("the System"). See `README.md` for what the
 project is and how it's laid out; this file covers conventions for
 anyone — human or AI agent — working in the codebase.
+
+## Common commands
+
+There's no repo-wide build/lint/test command. Each `services/<name>` is
+an independently-installed, independently-tested Python package (own
+venv, own `pyproject.toml`/`requirements.txt`); `infra/` is OpenTofu.
+To work on one service:
+
+```bash
+cd services/<name>
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"    # or -r requirements.txt — check that service's README
+.venv/bin/python -m pytest           # -q for quiet; -k <expr> or path::test_name for one test
+```
+
+Install order matters for several services: a service that declares a
+sibling as a real path dependency (e.g. `job-dispatcher` needs
+`run-registry`, `kms-boundary`, `issue-tracker` installed first; `gates`
+needs five siblings) can have pip silently reinstall that sibling
+non-editably as a side effect of a later `pip install` — the fix every
+affected README/CI job uses is `pip install -e ../<dep>
+--force-reinstall --no-deps` for each sibling right after. Don't guess
+the sequence: `.github/workflows/ci.yml` is the tested, authoritative
+install command for every service, and each service's own README covers
+the same ground.
+
+No repo-wide linter/formatter exists. `ruff`/`mypy`/`bandit` appear only
+inside `verification-pipeline`'s own dependencies, where they're tools
+it runs *against a target repo it's verifying*, not config for this
+repo itself — pytest is the correctness bar everywhere in this repo.
+
+CI's other two checks, runnable locally:
+
+```bash
+docker compose -f docker-compose.yml config --quiet   # validates the D14 compose packaging
+tofu fmt -check -recursive infra/                      # infra/ formatting (tofu, never terraform)
+```
 
 ## What's here
 
@@ -46,6 +87,17 @@ anyone — human or AI agent — working in the codebase.
   networked — see `docker-compose.yml`'s own top-of-file comment and
   each `Dockerfile`'s own comment for exactly what's real versus a
   build-time self-check for that service today.
+- `deploy/run-worker/` — **not** part of the D14 Compose packaging (its
+  own README explains why it's a manual tool instead of a compose
+  service). `live_run.py`/`jira_poll_run.py` are the actual real
+  orchestrator process entrypoint: real GitHub App clone → real
+  Bedrock plan/implement loop → real verification → a real gate → a
+  real PR, sharing one `_run_lib.py` so the two scripts never drift.
+  This is the closest thing in the repo to a working end-to-end run
+  today, and materially narrows (without fully closing) the
+  "`orchestrator` has no real process entrypoint" gap below — read its
+  README before assuming that gap is still 100% open. Gitignored
+  `data/`/`mirrors/` under it hold real per-run state.
 
 ## The one rule everything else follows
 
@@ -157,14 +209,17 @@ human decision before this goes anywhere near real tenant data:
   from spec §9.5 text**, since D7 landed before `orchestrator` did — it
   hasn't been diffed against what `orchestrator` actually emits.
   Reconcile before relying on both together.
-- **`orchestrator` has no real process entrypoint** — it's a library
-  driven by tests so far, not something any other component in this
-  codebase calls at runtime (`job-dispatcher` doesn't dispatch to it).
-  D14's Docker Compose packaging works around this honestly: its
-  container builds the image and runs the package's own test suite as
-  a build-time self-check, then exits, rather than staying up as a
-  service. A real entrypoint `job-dispatcher` can actually call is
-  still open.
+- **`orchestrator` has no real process entrypoint that `job-dispatcher`
+  calls** — within the services' own boundaries it's still a library
+  driven by tests, and D14's Docker Compose packaging works around that
+  honestly (its container builds the image and runs the package's own
+  test suite as a build-time self-check, then exits, rather than
+  staying up as a service). `deploy/run-worker/` (`live_run.py`/
+  `jira_poll_run.py`, see "What's here" above) *does* run the real
+  orchestrator end-to-end today — real clone, real plan/implement, real
+  verification, real gate, real PR — but as manually-invoked scripts
+  outside Compose, not a service `job-dispatcher` dispatches to. A real
+  dispatcher→orchestrator integration is the piece still open.
 - **The Run Registry has no network-reachable server** — every
   consumer (`job-dispatcher`, `fleet-dashboard`, `orchestrator`,
   `gates`) links F2 in as an embedded library against one shared SQLite
@@ -186,12 +241,13 @@ single-tenant Docker Compose stack that delegates model inference to an
 external API-key vendor (§13.8) — see the top-level README's "Quick
 start" and "Multi-tenant cloud deployment" sections. Two gaps from the
 Docker Compose pass are worth stating plainly rather than glossing over:
-there is no real orchestrator process entrypoint yet (it's a library
-driven by tests so far — its container currently just runs its test
-suite as a self-check, not a running service), and the Run Registry has
-no network-reachable server (every consumer uses it as an embedded
-library against one SQLite file — the compose packaging works around
-this with a shared Docker volume). See "Known cross-deliverable gaps"
-above for the full list of what's still open before a real deployment;
-see each service's own README for what's real versus mocked at its own
-external boundary.
+`orchestrator` has no process entrypoint `job-dispatcher` calls within
+Compose (its container currently just runs its test suite as a
+self-check, not a running service) — though `deploy/run-worker/`
+separately runs the real orchestrator end-to-end outside Compose, see
+"What's here" above — and the Run Registry has no network-reachable
+server (every consumer uses it as an embedded library against one
+SQLite file — the compose packaging works around this with a shared
+Docker volume). See "Known cross-deliverable gaps" above for the full
+list of what's still open before a real deployment; see each service's
+own README for what's real versus mocked at its own external boundary.
