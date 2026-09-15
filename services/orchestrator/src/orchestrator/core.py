@@ -552,10 +552,25 @@ class Orchestrator:
                 ),
                 parallel_group=None,
             )
-            diff = self.agent_backend.implement_subtask(run_context=self._run_context(run), subtask=fixup_subtask)
+            try:
+                diff = self.agent_backend.implement_subtask(run_context=self._run_context(run), subtask=fixup_subtask)
+            except Exception as exc:  # noqa: BLE001 -- see _handle_implementation_failure's own docstring
+                return self._handle_implementation_failure(run, progress, artifact, exc)
             progress.files_touched = sorted(set(progress.files_touched) | set(diff.files_touched))
             progress.lines_changed += diff.lines_changed
             progress.last_verification_failure_summary = ""
+            # Deliberately NOT resetting consecutive_same_stage_failures
+            # here, unlike the regular batch-completion path below: this
+            # fix-up subtask succeeding only means the implementation
+            # *call* didn't error -- it says nothing about whether the
+            # real underlying verification issue is actually fixed (only
+            # a real verification PASS proves that, and already resets
+            # this counter itself). Section 9.3's own wording is
+            # "repeated verification failures on the same issue" -- a
+            # subtask that keeps producing a diff but never actually
+            # fixes the real defect must still count toward "stuck", not
+            # get a fresh budget every time its own implementation call
+            # happens not to raise.
             self.progress_store.save(progress)
             return "verify"
 
@@ -577,17 +592,26 @@ class Orchestrator:
         # isolation, `AgentBackend`'s default falls back to sequential);
         # a lone subtask keeps calling `implement_subtask` directly,
         # unchanged from before this existed.
-        if len(subtask_objs) > 1:
-            diffs = self.agent_backend.implement_subtasks_parallel(
-                run_context=self._run_context(run), subtasks=subtask_objs
-            )
-        else:
-            diffs = [self.agent_backend.implement_subtask(run_context=self._run_context(run), subtask=subtask_objs[0])]
+        try:
+            if len(subtask_objs) > 1:
+                diffs = self.agent_backend.implement_subtasks_parallel(
+                    run_context=self._run_context(run), subtasks=subtask_objs
+                )
+            else:
+                diffs = [self.agent_backend.implement_subtask(run_context=self._run_context(run), subtask=subtask_objs[0])]
+        except Exception as exc:  # noqa: BLE001 -- see _handle_implementation_failure's own docstring
+            return self._handle_implementation_failure(run, progress, artifact, exc)
 
         for st, diff in zip(batch, diffs):
             progress.completed_subtask_ids.append(st["task_id"])
             progress.files_touched = sorted(set(progress.files_touched) | set(diff.files_touched))
             progress.lines_changed += diff.lines_changed
+        # See `_handle_implementation_failure`'s own docstring: reset the
+        # same counter it increments on any real success here, exactly
+        # like a verification pass already does, so a failure on an
+        # earlier subtask doesn't keep counting toward "stuck" against a
+        # later, unrelated one that actually succeeded.
+        progress.consecutive_same_stage_failures = 0
         self.progress_store.save(progress)
 
         # D11 instrumentation: ship an idempotent per-subtask cost metric
@@ -645,6 +669,81 @@ class Orchestrator:
             return "paused"
 
         return "continue" if self._next_subtask(artifact, progress) is not None else "verify"
+
+    def _handle_implementation_failure(self, run: Run, progress: RunProgress, artifact: dict, exc: Exception) -> str:
+        """Real live-run gap this closes: an exception raised by
+        `AgentBackend.implement_subtask`/`implement_subtasks_parallel`
+        (e.g. `tool_use_bedrock_backend.BedrockAgenticLoopExhaustedError`
+        -- a plan authoring a subtask this agent structurally cannot
+        complete; that module's own `implement_subtasks_parallel`
+        docstring already documented the expectation that "the first
+        real failure is re-raised so `core.py`'s existing
+        implementation-failure handling applies unchanged" -- except no
+        such handling existed here until now) used to propagate all the
+        way out of `_drive` uncaught, caught only generically by
+        `deploy/run-worker/jira_poll_run.py`'s top-level "a real,
+        transient infrastructure failure must never crash this whole
+        process" handler. That handler is correct for what it was built
+        for (a Bedrock timeout, a GitHub outage) but cannot tell a
+        genuinely transient blip apart from a subtask that will keep
+        failing identically forever -- and critically,
+        `progress.consecutive_same_stage_failures` (Section 9.3's real
+        "stuck" checkpoint trigger) was only ever incremented by
+        `_verification_step`, never here, so a systematically failing
+        implementation attempt retried silently and identically, once
+        per external poll tick, with no bound and no human ever seeing
+        it -- the exact same real Section 9.3 safety net a repeated
+        verification failure already gets, just never wired up on this
+        side. This closes that gap the same way: count it exactly like a
+        verification failure (same counter, same checkpoint evaluation),
+        and pause with a real, human-visible "stuck" checkpoint once the
+        retry budget is exhausted, instead of looping unbounded. Below
+        that budget, returns "continue" so `_drive`'s own loop retries
+        the identical still-incomplete subtask immediately -- no
+        external poll tick needed -- exactly like a "retry" verification
+        outcome already does."""
+        progress.consecutive_same_stage_failures += 1
+        self.progress_store.save(progress)
+
+        if self.observability is not None:
+            self.observability.push_alert(
+                kind="implementation_attempt_failed",
+                message=f"{type(exc).__name__}: {exc}"[:2000],
+                run_id=run.id,
+                tenant_id=self.tenant_id,
+                trace_id=run.trace_id,
+            )
+
+        triggers = evaluate_checkpoints(
+            diff_stats=DiffStats(files_touched=tuple(progress.files_touched), lines_changed=progress.lines_changed),
+            declared_scope_in=tuple(artifact.get("declared_scope", {}).get("in_scope", [])),
+            budget=resolve_budget(
+                story_size=artifact["risk"]["story_size"],
+                cross_cutting_or_high_risk=artifact["risk"]["cross_cutting_or_high_risk"],
+                budgets=self.budgets,
+            ),
+            elapsed_minutes=progress.elapsed_minutes(now=self._clock()),
+            spend_usd=progress.spend_usd,
+            consecutive_same_stage_failures=progress.consecutive_same_stage_failures,
+        )
+        triggers = [t for t in triggers if t.signature() not in progress.acknowledged_checkpoint_signatures]
+        self._alert_on_triggers(run, triggers)
+        stuck = next((t for t in triggers if t.kind == "stuck"), None)
+        if stuck is not None:
+            elicitation = Elicitation(
+                checkpoint_id=str(uuid4()),
+                trigger="stuck",
+                stage=run.stage,
+                reason=stuck.reason,
+                details=stuck.details,
+                created_at=_now_iso(),
+                status=PENDING,
+                signature=stuck.signature(),
+            )
+            self._write_checkpoint_pointer(run, elicitation.to_json())
+            return "paused"
+
+        return "continue"
 
     def _alert_on_triggers(self, run: Run, triggers: list) -> None:
         """D11 instrumentation (Section 16.4 "alerting, not babysitting"):
