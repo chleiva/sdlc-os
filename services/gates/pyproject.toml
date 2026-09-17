@@ -15,7 +15,7 @@ requires-python = ">=3.11"
 # omits `run-registry`: a plain `pip install .` would otherwise try (and
 # fail) to resolve them from PyPI.
 dependencies = [
-    "requests>=2.31",
+    "requests>=2.34.2",
 ]
 
 [project.optional-dependencies]
