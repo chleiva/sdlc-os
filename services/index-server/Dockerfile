@@ -19,7 +19,7 @@
 # README explicitly documents python3.13 for this service (its own
 # tree-sitter grammar pins are validated against that interpreter).
 
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app/services/index-server
 COPY services/index-server/ /app/services/index-server/

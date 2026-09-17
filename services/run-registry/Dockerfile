@@ -26,7 +26,7 @@
 # Dockerfile only ever COPYs its own directory, but uses the repo-root
 # context so every service Dockerfile follows the same convention.
 
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # Real, minimal build deps: run-registry itself is pure-Python +
 # stdlib sqlite3, no compiled extensions -- gcc etc. are not needed.

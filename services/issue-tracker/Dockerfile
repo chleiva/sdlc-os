@@ -29,7 +29,7 @@
 # required for `pip install -e '.[dev]'` to resolve at all (discovered
 # by actually attempting this build -- see this deliverable's report).
 
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app/services
 COPY services/kms-boundary/ /app/services/kms-boundary/
