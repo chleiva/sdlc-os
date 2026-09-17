@@ -80,6 +80,7 @@ jobs:
             run: |
               python3 -m venv .venv
               .venv/bin/pip install -e ".[dev]" -e ../run-registry
+              .venv/bin/pip install -e ../verification-pipeline
               .venv/bin/python -m pytest tests/ -v
 
           - name: job-dispatcher
