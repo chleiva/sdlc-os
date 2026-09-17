@@ -15,7 +15,7 @@ requires-python = ">=3.11"
 dependencies = [
     "mcp==2.2.0",
     "jsonschema>=4.26.0",
-    "anyio>=4.0",
+    "anyio>=4.15.1",
     # (New, Rev 9) bedrock_backend.py's real boto3 bedrock-runtime client
     # (Section 13.8's Amazon Bedrock vendor option) -- this package's first
     # AWS SDK dependency; ollama_backend.py/anthropic_backend.py/
