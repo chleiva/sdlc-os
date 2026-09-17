@@ -198,7 +198,7 @@ jobs:
 
       - name: Set up OpenTofu
         if: matrix.needs_tofu
-        uses: opentofu/setup-opentofu@v1
+        uses: opentofu/setup-opentofu@v2
 
       - name: Install & test
         working-directory: ${{ matrix.dir }}
@@ -217,5 +217,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: opentofu/setup-opentofu@v1
+      - uses: opentofu/setup-opentofu@v2
       - run: tofu fmt -check -recursive infra/
