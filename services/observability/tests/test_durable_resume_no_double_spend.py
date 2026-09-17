@@ -7,8 +7,12 @@ Per the task brief, this EXTENDS orchestrator's own real durable-resume
 proof shape (`services/orchestrator/tests/test_durable_resume.py`:
 `test_resume_after_simulated_process_restart_mid_implementation`) rather
 than duplicating its fixture from scratch -- the same "process 1 does
-t1, crashes attempting t2; process 2 (fresh Orchestrator/RegistryService/
-stores over the same on-disk state) resumes and does only t2" scenario,
+t1, exhausts its retry budget attempting t2 and pauses on a real,
+durable "stuck" checkpoint (`core.py`'s `_handle_implementation_failure`,
+not an uncaught crash -- see that method's own docstring); process 2
+(fresh Orchestrator/RegistryService/stores over the same on-disk state)
+resumes, sees the same pending checkpoint, is told to continue past it,
+and does only t2" scenario,
 with an `observability=` client wired into BOTH processes (sharing one
 on-disk sink, since the real off-node store outlives either process),
 and this test's own additional assertion: the cumulative cost metric for
@@ -64,8 +68,8 @@ def test_resumed_run_does_not_double_count_pre_restart_cost(tmp_path, tenant_id)
     sink = EventSink(path=tmp_path / "off_node_store.jsonl")
 
     # ---- "Process 1": drive to the plan gate, approve it, complete t1
-    # for real (its cost metric ships for real), then crash attempting
-    # t2 (backend_1's script is exhausted -- the same crash-stand-in
+    # for real (its cost metric ships for real), then exhaust its retry budget attempting
+    # t2 (backend_1's script is exhausted -- the same stand-in
     # `test_durable_resume.py` itself uses). ----
     backend_1 = ScriptedAgentBackend(
         plans=[_two_subtask_plan()],
@@ -85,12 +89,10 @@ def test_resumed_run_does_not_double_count_pre_restart_cost(tmp_path, tenant_id)
     status = orch_1.start_run(jira_key="PROJ-300", repo="acme/app", branch="feature/resume-cost", trace_id="trace-resume-cost")
     run_id = status.run_id
 
-    try:
-        orch_1.approve_plan(status.run_id, decision="approve")
-        crashed = False
-    except RuntimeError:
-        crashed = True
-    assert crashed, "expected process 1 to crash attempting t2 with an exhausted script"
+    status = orch_1.approve_plan(status.run_id, decision="approve")
+    assert status.paused is True
+    assert status.pause_kind == "checkpoint"
+    assert status.checkpoint.trigger == "stuck"
 
     registry_1.close()
     del orch_1, registry_1, backend_1, observability_1
@@ -122,6 +124,14 @@ def test_resumed_run_does_not_double_count_pre_restart_cost(tmp_path, tenant_id)
         observability=observability_2,
     )
     resumed_status = orch_2.resume_run(run_id)
+    # Durable across the "restart": the pending "stuck" checkpoint from
+    # process 1 is still there, read from real on-disk state -- resuming
+    # must not silently blow past it.
+    assert resumed_status.paused is True
+    assert resumed_status.pause_kind == "checkpoint"
+    assert resumed_status.checkpoint.trigger == "stuck"
+
+    resumed_status = orch_2.resolve_checkpoint(run_id, decision="continue")
 
     assert resumed_status.stage == "change_review_gate"
     assert backend_2.implement_call_count == 1  # only t2 was (re-)executed
