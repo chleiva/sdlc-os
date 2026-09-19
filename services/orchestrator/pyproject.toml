@@ -21,7 +21,7 @@ dependencies = [
     # AWS SDK dependency; ollama_backend.py/anthropic_backend.py/
     # openai_backend.py all use stdlib urllib instead, no new dependency
     # needed for those three vendors.
-    "boto3>=1.43.91",
+    "boto3>=1.43.95",
 ]
 
 [project.optional-dependencies]
