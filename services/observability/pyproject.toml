@@ -12,7 +12,7 @@ dependencies = [
     # network-dependent exporters used; see README "What's real vs
     # mocked"). Pinned to one exact version so the trace/span-id
     # generation semantics this deliverable relies on don't drift.
-    "opentelemetry-api==1.44.0",
+    "opentelemetry-api==1.45.0",
     "opentelemetry-sdk==1.44.0",
 ]
 
