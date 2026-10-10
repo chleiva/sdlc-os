@@ -9,7 +9,7 @@
 # tree-sitter-typescript for TypeScript, the second language this
 # server indexes (see README/engine/languages.py for why TypeScript
 # was chosen over Go).
-mcp==2.2.0
+mcp==2.3.0
 jsonschema==4.26.0
 anyio==4.15.1
 pytest==9.1.1

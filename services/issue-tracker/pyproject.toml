@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
     "jsonschema>=4.20",
-    "mcp==2.2.0",
+    "mcp==2.3.0",
     "anyio>=4.0",
     # kms-boundary: the per-tenant KMS envelope-encryption boundary
     # (spec Sec. 17.3) SETUP.md previously only described as an

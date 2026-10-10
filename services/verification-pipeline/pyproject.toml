@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "D7: Verification Pipeline (SDLC Auto, Wave 1) -- Sec. 11's seven verification layers."
 requires-python = ">=3.11"
 dependencies = [
-    "mcp==2.2.0",
+    "mcp==2.3.0",
     "jsonschema==4.26.0",
     "anyio==4.15.1",
     "tree-sitter==0.26.0",

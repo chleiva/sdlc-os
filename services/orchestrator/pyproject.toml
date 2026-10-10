@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 # package. Not listed here because a plain `pip install .` would then try
 # (and fail) to resolve "run-registry" from PyPI; see README "Setup".
 dependencies = [
-    "mcp==2.2.0",
+    "mcp==2.3.0",
     "jsonschema>=4.26.0",
     "anyio>=4.15.1",
     # (New, Rev 9) bedrock_backend.py's real boto3 bedrock-runtime client
