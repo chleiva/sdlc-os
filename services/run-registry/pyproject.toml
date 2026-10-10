@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "F2: Run Registry schema + Registry Service (SDLC Auto, Wave 0)"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp==2.2.0",
+    "mcp==2.3.0",
 ]
 
 [project.optional-dependencies]
