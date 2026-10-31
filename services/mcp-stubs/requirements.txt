@@ -8,5 +8,5 @@
 # reviewed change, not a silent upgrade.
 mcp==2.2.0
 jsonschema==4.26.0
-pytest==9.1.1
+pytest==9.2.0
 anyio==4.15.1
